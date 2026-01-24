@@ -69,8 +69,8 @@ def process_model(file_path: str, output_path: str, use_quant: bool) -> str:
 
     # vits model may change and have issue in simplify
     if "vits" in output_lower:
-        model = optimize(model, passes=get_fuse_and_elimination_passes())
-        logger.info(f"ONNX optimization done for: {output_path}")
+        # model = optimize(model, passes=get_fuse_and_elimination_passes())
+        # logger.info(f"ONNX optimization done for: {output_path}")
         model = slim(model)
         logger.info(f"ONNX simplification done for: {output_path}")
         model = version_converter.convert_version(model, 21)

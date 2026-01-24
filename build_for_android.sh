@@ -56,7 +56,7 @@ cd onnxruntime-1.22.0
 cd ..
 
 export ORT_LIB_LOCATION=$PWD/onnx_build/onnxruntime-1.22.0/build/Android/MinSizeRel
-export ORT_INCLUDE_DIR==$PWD/onnx_build/onnxruntime-1.22.0/include
+export ORT_INCLUDE_DIR=$PWD/onnx_build/onnxruntime-1.22.0/include
 
 export TARGET=aarch64-linux-android
 

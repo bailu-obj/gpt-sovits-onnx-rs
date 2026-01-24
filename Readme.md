@@ -8,6 +8,10 @@
 
 将在保证可接受精度的前提下，对实时性进行持续优化。
 
+目前的实时性优化已经接近尾声，后续考虑中英文混合场景的优化。
+
+之前的账号由于一些原因被删除，导致原项目删除。
+
 -----
 
 ## 核心特性
@@ -16,17 +20,21 @@
 * **一键式模型转换**：提供位于 `scripts` 目录的 Python 脚本，用于一键导出和优化 SoVITS 模型。**注意：** 优化后的模型结构与官方不兼容，转换时需使用本项目提供的完整脚本并按照文档操作。
 * **完整的 Android 构建支持**：提供了 `build_for_android.sh` 脚本，自动化处理 ONNX Runtime 的源码下载、编译及项目构建，解决了官方 `ort-rs` 缺少 Android 预构建包的问题。
 
+
+* 详细性能数据请参考 [**性能记录 (perf\_record)**](doc/perf_record.md)。
+* 通过在运行时设置lang_id为LangId::AutoYue，可以启用粤语模式。
+
 -----
 
 ## 项目状态与已知问题
+2026-01-25: 测试了ort_rc11,但是在mac（arm）上性能更差（-10%），目前将deps固定在了ort_rc10。参见[update/ort_rc_11](https://github.com/bailu-obj/gpt-sovits-onnx-rs/tree/update/ort_rc_11)分支  
+
 2025-11-06: 初步支持V2Pro模型，详情请见转换脚本。目前V2Pro的精度和速度仍未优化，且android平台仍未验证。
 
 2025-07-12: 将部分onnx模型代码同步到和pytorch一致，简化了一部分模型逻辑，并修复了library中由于缺少空白声音导致的吸气问题，如果提示找不到输出，请更新hf上的新模型，或者重新转换自己的模型。
 
 2025-06-30: 提取sampler到rust层，并更新了模型转换脚本和demo模型，如果提示找不到输出，请更新模型。
 
-* **性能持续优化中**：详细性能数据请参考 [**性能记录 (perf\_record)**](doc/perf_record.md)。
-* **尝试引入粤语支持**: 通过在运行时设置lang_id为LangId::AutoYue，可以启用粤语模式。
 
 -----
 
@@ -34,17 +42,11 @@
 
 在 Android 设备上进行了演示，以直观展示当前效果。
 
-* **源代码**: [gpt-sovits-android-demo](https://github.com/null-define/gpt-sovits-android-demo/tree/master)
 * **演示视频**:
 
 目前推理耗时在8 elite这一类的高端移动端soc上是可以接受的。
 
 https://github.com/user-attachments/assets/03565b5f-a3e4-4689-83c5-7ed72b6acf86
-
-当和LLM结合时，TTS的效果如下（此demo由于bug太多功能不稳定，尚未开源）
-
-https://github.com/user-attachments/assets/158fafd4-e2c9-416d-92c8-8e4340220de8
-
 
 
 > **注意**：演示机型为 iQOO 13。实际推理时间在不同 SoC 和设备上可能存在显著差异。
@@ -61,6 +63,10 @@ https://github.com/user-attachments/assets/158fafd4-e2c9-416d-92c8-8e4340220de8
 | **[GPT-SoVITS-RS](https://github.com/second-state/gpt_sovits_rs)** | ★★★★★ (接近原版) | ★★★★☆ (依赖 Torch) | ★★☆☆☆ (Android 支持不佳) | ★★★☆☆ (需手动配置) |
 | **本项目** | ★★★☆☆ (当前不稳定) | ★★★★☆ (ONNX 优化) | ★★★☆☆ (支持 ARM/x86) | ★★★★☆ (Android 需手动执行构建脚本) |
 
+其它基于RUST的TTS方案：
+
+- 如果对于实时性要求不高，或者有一定性能的GPU(mac/nvidia)，可以使用[vox-cpm](https://github.com/bailu-obj/voxcpm-rs) 来达到更好的TTS效果。
+- CosyVoice3目前也存在RUST/Candle的实现，可以参考 https://github.com/huggingface/candle/pull/3281
 -----
 
 ## 使用建议
@@ -142,18 +148,3 @@ RUST_LOG=Debug ./target/release/examples/gpt_sovits_demo --model-path /Users/nek
     ```bash
     cargo build --target aarch64-linux-android --release --features jni --examples
     ```
-
------
-
-## 实验性功能探索
-
-我对使用其他执行后端（Execution Provider）或替代运行时进行了初步测试。
-
-### ONNX Execution Provider (EP)
-
-* ✅ **XNNPACK**: 可用于加速 Decoder 模型，但在测试机（iQOO 13）上未观察到显著性能提升。此结论可能不适用于所有硬件平台。
-* ⚠️ **NNAPI**: 所有模型均可运行，但无论使用 fp16 还是 fp32，均未带来性能改善。Google 官方已不推荐优先使用 NNAPI。
-
-### ONNX 替代运行时
-
-* ❌ **MNN**: 尝试将 ONNX 模型转换为 MNN 格式。虽然模型可以使用 MNN C++ API (v3.2.0) 成功加载，但在运行时，Decoder 部分出现内存分配失败或输入丢失的错误（具体错误取决于是否使用了优化脚本）。由于这可能是 MNN 本身的 Bug，且个人时间和精力有限，已暂时搁置 MNN 方案。部分代码已经上传到[mnn_dev_backup 分支](https://github.com/null-define/gpt-sovits-onnx-rs/tree/mnn_dev_backup)，如果有大佬愿意探索可以使用此分支，
