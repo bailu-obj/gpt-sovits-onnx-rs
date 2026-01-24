@@ -3,7 +3,7 @@ use lazy_static::lazy_static;
 use std::{num::NonZero, path::Path};
 
 use ort::{
-    execution_providers::{CPUExecutionProvider, xnnpack::XNNPACKExecutionProvider},
+    execution_providers::CPUExecutionProvider,
     session::{Session, builder::GraphOptimizationLevel},
 };
 
@@ -23,10 +23,12 @@ pub fn create_onnx_cpu_session<P: AsRef<Path>>(path: P) -> Result<Session, GSVEr
         .with_prepacking(true)?
         .with_config_entry("session.enable_mem_reuse", "1")?
         .with_independent_thread_pool()?
+        .with_inter_op_spinning(false)?
         .with_intra_op_spinning(true)?
+        .with_memory_pattern(false)?
+        .with_aot_inlining(true)?
         .commit_from_file(path)?)
 }
-
 
 // pub fn create_onnx_xnnpack_cpu_session<P: AsRef<Path>>(path: P) -> Result<Session, GSVError> {
 //     Ok(Session::builder()?

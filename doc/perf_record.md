@@ -3,6 +3,9 @@
 * **Input**: 你好呀，我们是一群追逐梦想的人！
 * **Output WAV Time**: 3s
 
+## **Mac**
+* **Hardware**: Mac Mini M4 Pro
+
 ## **PC**
 
 * **Hardware**: AMD Ryzen 7 7700
@@ -20,6 +23,9 @@
 
 | Platform   | Optimization     | T2S S Decoder Time | SoVITS Time | Index | E2E Time|
 | ---------- | ---------------- | ------------------ | ----------- | ----- | ------- |
+|  **Mac**   | 20250621(int8)   | 220ms              | 233ms       | 83    |  565 ms |
+|            | - 20260124(int8) | 304ms              | 304ms       | 93    |  642 ms |
+|            | - 20260124(fp16) | 462ms              | 289ms       | 95    |  785 ms |
 | **PC**     | Original FP32    | 26.489s            | 467.091ms   | 115   |  N/A    |
 |            | + onnxsim        | 12.919s            | 446.199ms   | 111   |  N/A    |
 |            | + optimize       | 9.601s             | 322.142ms   | 92    |  N/A    |

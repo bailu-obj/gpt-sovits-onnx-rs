@@ -180,7 +180,7 @@ impl TTSModel {
         let (ref_audio_16k, ref_audio_32k) = read_and_resample_audio(&reference_audio_path)?;
         let ssl_content = self.process_ssl(&ref_audio_16k)?;
 
-        let sv_emb =  match &mut self.sv {
+        let sv_emb = match &mut self.sv {
             Some(sv_model) => {
                 let sv_emb = sv_model.infer(&ref_audio_16k.row(0).to_owned())?;
                 debug!("SV embedding shape: {:?}", sv_emb.shape());

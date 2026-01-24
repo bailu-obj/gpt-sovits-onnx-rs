@@ -8,12 +8,12 @@ crate-type = ["rlib"] # Supports rlib  outputs
 
 [[example]]
 name = "gpt_sovits_demo_jni"
-crate-type = ["cdylib"] # cdylib
+crate-type = ["cdylib"]      # cdylib
 required-features = ["jni"]
 
 
 [dependencies]
-ort = { version = "2.0.0-rc.10", features = [
+ort = { version = "2.0.0-rc.11", features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",
@@ -21,7 +21,7 @@ ort = { version = "2.0.0-rc.10", features = [
 ] }
 arpabet = "2.0.0"
 jieba-rs = "0.7.2"
-ndarray = "0.16.1"
+ndarray = "0.17.2"
 pinyin = "0.10.0"
 log = "0.4.25"
 hound = "3.5.1"
@@ -47,15 +47,15 @@ clap = { version = "4.5", features = ["derive"] }
 rand = "0.9.1"
 smallvec = "1.15"
 regex = "1.11"
-rubato = "0.16"                                                     # For audio resampling
+rubato = "0.16" # For audio resampling
 unicode-segmentation = "1.10.1"
-knf-rs = "0.3.2"
+knf-rs = { git = "https://github.com/bailu-obj/pyannote-rs.git", branch = "main" }
 
 [features]
 jni = ["dep:jni"] # Enables JNI and dynamic ONNX loading for Android
 
 [target.'cfg(target_os = "android")'.dependencies]
-ort = { version = "2.0.0-rc.10", features = [
+ort = { version = "2.0.0-rc.11", features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",

@@ -1,13 +1,7 @@
 use knf_rs::compute_fbank;
 use log::debug;
-use ndarray::{
-    Array, Array1, Array2, ArrayBase, ArrayD
-};
-use ort::{
-    inputs,
-    session::Session,
-    value::{TensorRef},
-};
+use ndarray::{Array, Array1, Array2, ArrayBase, ArrayD};
+use ort::{inputs, session::Session, value::TensorRef};
 
 use crate::GSVError;
 

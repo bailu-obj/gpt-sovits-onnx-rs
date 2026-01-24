@@ -34,17 +34,11 @@
 
 在 Android 设备上进行了演示，以直观展示当前效果。
 
-* **源代码**: [gpt-sovits-android-demo](https://github.com/null-define/gpt-sovits-android-demo/tree/master)
 * **演示视频**:
 
 目前推理耗时在8 elite这一类的高端移动端soc上是可以接受的。
 
 https://github.com/user-attachments/assets/03565b5f-a3e4-4689-83c5-7ed72b6acf86
-
-当和LLM结合时，TTS的效果如下（此demo由于bug太多功能不稳定，尚未开源）
-
-https://github.com/user-attachments/assets/158fafd4-e2c9-416d-92c8-8e4340220de8
-
 
 
 > **注意**：演示机型为 iQOO 13。实际推理时间在不同 SoC 和设备上可能存在显著差异。
@@ -142,18 +136,3 @@ RUST_LOG=Debug ./target/release/examples/gpt_sovits_demo --model-path /Users/nek
     ```bash
     cargo build --target aarch64-linux-android --release --features jni --examples
     ```
-
------
-
-## 实验性功能探索
-
-我对使用其他执行后端（Execution Provider）或替代运行时进行了初步测试。
-
-### ONNX Execution Provider (EP)
-
-* ✅ **XNNPACK**: 可用于加速 Decoder 模型，但在测试机（iQOO 13）上未观察到显著性能提升。此结论可能不适用于所有硬件平台。
-* ⚠️ **NNAPI**: 所有模型均可运行，但无论使用 fp16 还是 fp32，均未带来性能改善。Google 官方已不推荐优先使用 NNAPI。
-
-### ONNX 替代运行时
-
-* ❌ **MNN**: 尝试将 ONNX 模型转换为 MNN 格式。虽然模型可以使用 MNN C++ API (v3.2.0) 成功加载，但在运行时，Decoder 部分出现内存分配失败或输入丢失的错误（具体错误取决于是否使用了优化脚本）。由于这可能是 MNN 本身的 Bug，且个人时间和精力有限，已暂时搁置 MNN 方案。部分代码已经上传到[mnn_dev_backup 分支](https://github.com/null-define/gpt-sovits-onnx-rs/tree/mnn_dev_backup)，如果有大佬愿意探索可以使用此分支，
