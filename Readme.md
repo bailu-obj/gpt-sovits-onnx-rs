@@ -27,6 +27,9 @@
 -----
 
 ## 项目状态与已知问题
+
+2026-03-21: 优化了中英文混合效果（借助Cursor自动化编写）
+
 2026-01-25: 测试了ort_rc11,但是在mac（arm）上性能更差（-10%），目前将deps固定在了ort_rc10。参见[update/ort_rc_11](https://github.com/bailu-obj/gpt-sovits-onnx-rs/tree/update/ort_rc_11)分支  
 
 2025-11-06: 初步支持V2Pro模型，详情请见转换脚本。目前V2Pro的精度和速度仍未优化，且android平台仍未验证。
@@ -38,35 +41,23 @@
 
 -----
 
-## Demo 展示
-
-在 Android 设备上进行了演示，以直观展示当前效果。
-
-* **演示视频**:
-
-目前推理耗时在8 elite这一类的高端移动端soc上是可以接受的。
-
-https://github.com/user-attachments/assets/03565b5f-a3e4-4689-83c5-7ed72b6acf86
-
-
-> **注意**：演示机型为 iQOO 13。实际推理时间在不同 SoC 和设备上可能存在显著差异。
-
------
-
 ## 方案对比
 
 为了帮助您选择最适合的方案，我将其与社区主流项目进行了对比。
 
 | 方案 | TTS 效果 | 性能 | 平台兼容性 | 易用性 |
 | :--- | :--- | :--- | :--- | :--- |
-| **sherpa-onnx** | ★★★☆☆ (情感稍弱) | ★★★★★ (模型小，实时性强) | ★★★★★ (全平台) | ★★★★★ (官方预构建) |
-| **[GPT-SoVITS-RS](https://github.com/second-state/gpt_sovits_rs)** | ★★★★★ (接近原版) | ★★★★☆ (依赖 Torch) | ★★☆☆☆ (Android 支持不佳) | ★★★☆☆ (需手动配置) |
-| **本项目** | ★★★☆☆ (当前不稳定) | ★★★★☆ (ONNX 优化) | ★★★☆☆ (支持 ARM/x86) | ★★★★☆ (Android 需手动执行构建脚本) |
+| **sherpa-onnx** | ★★☆☆☆ (情感稍弱) | ★★★★★ (模型小，实时性强) | ★★★★★ (全平台) | ★★★★★ (官方预构建) |
+| **[GPT-SoVITS-RS](https://github.com/second-state/gpt_sovits_rs)** | ★★☆★☆ (接近原版) | ★★★★☆ (依赖 Torch) | ★★☆☆☆ (Android 支持不佳) | ★★★☆☆ (需手动配置) |
+| **本项目** | ★★☆☆☆ (不稳定) | ★★★★☆ (ONNX 优化) | ★★★☆☆ (支持 ARM/x86) | ★★★★☆ (Android 需手动执行构建脚本) |
 
-其它基于RUST的TTS方案：
 
-- 如果对于实时性要求不高，或者有一定性能的GPU(mac/nvidia)，可以使用[vox-cpm](https://github.com/bailu-obj/voxcpm-rs) 来达到更好的TTS效果。
-- CosyVoice3目前也存在RUST/Candle的实现，可以参考 https://github.com/huggingface/candle/pull/3281
+其他TTS方案
+| 方案 | TTS 效果 | 性能 | 平台兼容性 | 易用性 |
+| :--- | :--- | :--- | :--- | :--- |
+| **[Qwen3TTS](https://github.com/predict-woo/qwen3-tts.cpp)** | ★★★★★ (效果优秀) | ★★☆☆☆ (GGML优化，但是模型本身开销大) | ★★★★☆ (理论支持全平台，但平台性能要求高) | ★★★★☆ (需要转换模型) |
+| **[VoxCPMRS（我的实现）](https://github.com/bailu-obj/voxcpm-rs)** | ★★★★☆ (效果优秀，但是测试不如qwen3) | ★☆☆☆☆ (Candle，性能在mac由于torch，其他平台不一定) | ★★☆☆☆ (全平台CPU，但延迟高) | ★★☆☆☆（暂仅适配mac平台）  |
+
 -----
 
 ## 使用建议
@@ -79,6 +70,8 @@ https://github.com/user-attachments/assets/03565b5f-a3e4-4689-83c5-7ed72b6acf86
   * ✅ **推荐使用 `GPT-SoVITS-RS`**
 * **追求高拟真度且需要在 Android 和 x86 CPU 上运行**：
   * ✅ **可以尝试本项目**，并欢迎帮助改进！
+* **追求高拟真度且有强大的GPU**：
+  * ✅ **建议使用Qwen TTS和VoxCPM**
 
 -----
 
