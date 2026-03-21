@@ -2,7 +2,7 @@ use std::{path::Path, str::FromStr, sync::Arc};
 
 use anyhow::Ok;
 use log::{debug, warn};
-use ndarray::{Array1, Array2, Axis, concatenate};
+use ndarray::Array2;
 use ort::{inputs, value::Tensor};
 use tokenizers::Tokenizer;
 
@@ -83,10 +83,7 @@ impl BertModel {
 
         let bert_feature_2d: Array2<f32> = bert_feature.into_dimensionality()?;
 
-        Ok(build_phone_level_feature(
-            bert_feature_2d,
-            Array1::from_vec(word2ph.to_vec()),
-        ))
+        Ok(build_phone_level_feature(bert_feature_2d, word2ph))
     }
 
     fn get_fake_bert(&self, total_phones: usize) -> Array2<f32> {
@@ -95,30 +92,28 @@ impl BertModel {
     }
 }
 
-// Helper function to expand word-level features to phone-level features.
-// This function is required by get_real_bert.
-fn build_phone_level_feature(res: Array2<f32>, word2ph: Array1<i32>) -> Array2<f32> {
-    let phone_level_features = word2ph
-        .into_iter()
-        .enumerate()
-        .map(|(i, count)| {
-            if i < res.dim().0 {
-                let row = res.row(i);
-                Array2::from_shape_fn((count as usize, res.ncols()), |(_j, k)| row[k])
-            } else {
-                // If word2ph has more elements than res rows, duplicate the last feature.
-                let last_row = res.row(res.dim().0 - 1);
-                Array2::from_shape_fn((count as usize, res.ncols()), |(_j, k)| last_row[k])
-            }
-        })
-        .collect::<Vec<_>>();
-
-    concatenate(
-        Axis(0),
-        &phone_level_features
-            .iter()
-            .map(|x| x.view())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
+// Expands word-level BERT features to phone-level features in one allocation.
+fn build_phone_level_feature(res: Array2<f32>, word2ph: &[i32]) -> Array2<f32> {
+    let ncols = res.ncols();
+    let n_words = res.dim().0;
+    let last_word = n_words.saturating_sub(1);
+    let total_rows: usize = word2ph.iter().map(|&c| c.max(0) as usize).sum();
+    let mut out = Array2::<f32>::zeros((total_rows, ncols));
+    let mut row = 0usize;
+    for (i, &count_raw) in word2ph.iter().enumerate() {
+        let count = count_raw.max(0) as usize;
+        if count == 0 {
+            continue;
+        }
+        let src_row = if i < n_words {
+            res.row(i)
+        } else {
+            res.row(last_word)
+        };
+        for r in 0..count {
+            out.row_mut(row + r).assign(&src_row);
+        }
+        row += count;
+    }
+    out
 }

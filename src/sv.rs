@@ -1,8 +1,6 @@
 use knf_rs::compute_fbank;
 use log::debug;
-use ndarray::{
-    Array, Array1, Array2, ArrayBase, ArrayD
-};
+use ndarray::ArrayD;
 use ort::{
     inputs,
     session::Session,
@@ -20,9 +18,9 @@ impl SvModel {
         Self { sv_session }
     }
 
-    pub fn infer(&mut self, audio_16k: &Array1<f32>) -> Result<ArrayD<f32>, GSVError> {
-        let audio_vec: Vec<f32> = audio_16k.to_vec();
-        let features = compute_fbank(&audio_vec).unwrap();
+    pub fn infer(&mut self, audio_16k: &[f32]) -> Result<ArrayD<f32>, GSVError> {
+        let features = compute_fbank(audio_16k)
+            .map_err(|e| GSVError::from(format!("SV fbank failed: {}", e)))?;
         debug!("SV features shape: {:?}", features.shape());
         let input_features = TensorRef::from_array_view(features.view());
 

@@ -44,14 +44,13 @@ lazy_static::lazy_static! {
     pub static ref DICT_POLY_CHARS: HashMap<char, PolyChar> = load_poly_chars();
 }
 
+#[inline]
+pub fn char_is_chinese(c: char) -> bool {
+    DICT_MONO_CHARS.contains_key(&c) || DICT_POLY_CHARS.contains_key(&c)
+}
+
 pub fn str_is_chinese(s: &str) -> bool {
-    let mut r = true;
-    for c in s.chars() {
-        if !DICT_MONO_CHARS.contains_key(&c) && !DICT_POLY_CHARS.contains_key(&c) {
-            r &= false;
-        }
-    }
-    r
+    !s.is_empty() && s.chars().all(char_is_chinese)
 }
 
 pub fn str_is_numeric(s: &str) -> bool {
@@ -64,9 +63,19 @@ pub fn str_is_punctuation(s: &str) -> bool {
     ];
     punctuations.contains(&s)
 }
+
+#[inline]
+pub fn char_is_numeric_or_punct(c: char) -> bool {
+    c.is_ascii_digit()
+        || matches!(
+            c,
+            ',' | '.' | '!' | '?' | ';' | ':' | '\'' | '"' | '(' | ')' | '[' | ']' | '<' | '>'
+                | '-' | '~' | '·' | '、' | '$' | '/'
+        )
+}
+
 pub fn is_numeric_or_punctuation(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_digit() || str_is_punctuation(&c.to_string()))
+    s.chars().all(char_is_numeric_or_punct)
 }
 
 // Finds the index of the maximum value in a 2D tensor

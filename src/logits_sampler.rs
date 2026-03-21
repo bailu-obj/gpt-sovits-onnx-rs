@@ -4,6 +4,9 @@ use rand::rngs::ThreadRng;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
+/// Only the last N prompt tokens participate in repetition penalty (matches common TTS/LLM practice).
+const REPETITION_LOOKBACK: usize = 256;
+
 /// Finds the token with the highest logit value (argmax).
 pub fn argmax(logits: &[f32]) -> i64 {
     let mut max_logit = f32::NEG_INFINITY;
@@ -104,7 +107,8 @@ impl Sampler {
         if penalty == 1.0 {
             return;
         }
-        let prev_tokens_set: HashSet<_> = prev_tokens.iter().copied().collect();
+        let start = prev_tokens.len().saturating_sub(REPETITION_LOOKBACK);
+        let prev_tokens_set: HashSet<_> = prev_tokens[start..].iter().copied().collect();
         for (token_id, logit) in logits.iter_mut().enumerate() {
             if prev_tokens_set.contains(&(token_id as i64)) {
                 if *logit >= 0.0 {
@@ -167,11 +171,18 @@ impl Sampler {
         Self::apply_temperature(logits, params.temperature);
         self.softmax(logits);
 
-        let mut candidates: Vec<(usize, f32)> = self.probs.iter().copied().enumerate().collect();
-
-        if candidates.is_empty() {
+        if self.probs.is_empty() {
             return argmax(logits);
         }
+
+        if params.top_k.is_none() && params.top_p.is_none() {
+            return match WeightedIndex::new(&self.probs) {
+                Ok(dist) => dist.sample(&mut self.rng) as i64,
+                Err(_) => argmax(logits),
+            };
+        }
+
+        let mut candidates: Vec<(usize, f32)> = self.probs.iter().copied().enumerate().collect();
 
         // --- Top-K Filtering (Optimized O(V) selection) ---
         if let Some(k) = params.top_k {

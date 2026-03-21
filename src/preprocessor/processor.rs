@@ -195,19 +195,21 @@ pub fn lang_process_token(
     lang_mixup(sentences, t, sentence_lang);
 }
 
-/// Handles mixed-language tokens by re-tokenizing and processing sub-tokens iteratively.
+/// Re-splits a token that did not match the fast paths in `lang_process_token`.
 pub fn lang_mixup(
     sentences: &mut Vec<Sentence>,
     mixed_token: &str,
     sentence_lang: crate::preprocessor::Lang,
 ) {
-    // Replace recursion with iteration to prevent stack overflow
-    let mut tokens_to_process = vec![mixed_token];
-
-    while let Some(sub_token) = tokens_to_process.pop() {
-        for sub_token_match in crate::preprocessor::lang::TOKEN_REGEX.find_iter(sub_token) {
-            let sub_token_str = sub_token_match.as_str();
-            lang_process_token(sentences, sub_token_str, sentence_lang);
-        }
+    let subs: Vec<&str> = crate::preprocessor::lang::TOKEN_REGEX
+        .find_iter(mixed_token)
+        .map(|m| m.as_str())
+        .collect();
+    if subs.len() == 1 && subs[0] == mixed_token {
+        push_en_word(sentences, mixed_token);
+        return;
+    }
+    for sub in subs {
+        lang_process_token(sentences, sub, sentence_lang);
     }
 }

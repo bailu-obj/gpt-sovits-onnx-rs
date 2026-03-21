@@ -553,10 +553,26 @@ impl NumSentence {
     }
 }
 
+/// True when the whole token should be spoken as a number (not mixed CJK text like `第10章`,
+/// nor alphanumeric tokens like `v2` that need regex splitting).
 pub fn is_numeric(p: &str) -> bool {
-    p.chars().any(|c| c.is_numeric())
-        || p.to_lowercase().contains(&[
-            'α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ', 'ν', 'ξ', 'ο', 'π', 'ρ',
-            'σ', 'ς', 'τ', 'υ', 'φ', 'χ', 'ψ', 'ω',
-        ])
+    let p = p.trim();
+    if p.is_empty() {
+        return false;
+    }
+    if p.chars().any(|c| {
+        matches!(
+            c,
+            '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}' | '\u{20000}'..='\u{2ceaf}'
+        )
+    }) {
+        return false;
+    }
+    let has_ascii_letter = p.chars().any(|c| c.is_ascii_alphabetic());
+    let has_ascii_digit = p.chars().any(|c| c.is_ascii_digit());
+    if has_ascii_letter && has_ascii_digit {
+        return false;
+    }
+    p.chars()
+        .any(|c| c.is_numeric() || matches!(c, 'α'..='ω' | 'Α'..='Ω'))
 }

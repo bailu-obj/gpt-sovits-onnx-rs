@@ -1,7 +1,7 @@
 // preprocessor/lang.rs
 use crate::preprocessor::processor;
 use crate::preprocessor::sentence::Sentence;
-use crate::preprocessor::utils::{is_numeric_or_punctuation, str_is_chinese, str_is_numeric};
+use crate::preprocessor::utils::is_numeric_or_punctuation;
 use jieba_rs::Jieba;
 use log::debug;
 use once_cell::sync::Lazy;
@@ -25,82 +25,54 @@ pub enum LangId {
     AutoYue, // Cantonese
 }
 
-/// Updates the function to support Chinese numerals and mixed Chinese/number segments
-fn split_into_lang_segments(text: &str) -> Vec<(Lang, &str)> {
-    let mut segments = Vec::new();
-    let mut byte_offset = 0usize;
-    let bytes = text.as_bytes();
-    let mut prev_lang = Lang::Zh; // Default to Chinese
-
-    while byte_offset < bytes.len() {
-        // Find start of the next segment
-        let char_start = text[byte_offset..].chars().next().unwrap_or('\0');
-        let is_zh_start = str_is_chinese(&char_start.to_string());
-
-        // If the segment is a Chinese numeral and previous segment was Chinese, treat it as part of Chinese
-        let mut byte_end = byte_offset;
-        for ch in text[byte_offset..].chars() {
-            // Check if it's a Chinese numeral or Chinese character
-            if (str_is_chinese(&ch.to_string())) != is_zh_start {
-                break;
-            }
-            let ch_bytes = ch.len_utf8();
-            byte_end += ch_bytes;
-        }
-
-        let segment = &text[byte_offset..byte_end];
-        let lang = if is_zh_start { Lang::Zh } else { Lang::En };
-
-        // If the previous segment was Chinese and this is a number, we should treat it as Chinese as well
-        if prev_lang == Lang::Zh && is_numeric_or_punctuation(segment) {
-            prev_lang = Lang::Zh;
-        } else {
-            prev_lang = lang;
-        }
-
-        if !segment.trim().is_empty() {
-            segments.push((prev_lang, segment));
-        }
-
-        byte_offset = byte_end;
-    }
-
-    segments
-}
-
-/// Splits text into language-specific sentences using language segments.
-/// Tokenizes each segment according to its language (Jieba for Chinese, regex for English),
-/// then processes tokens into Sentences. This allows splitting by language while composing
-/// back within the same sentence (segments are processed into Sentences, then grouped later).
+/// One `TOKEN_REGEX` scan over `text`: Jieba refines Han spans; other spans use the same regex
+/// tokens. Digits / punctuation after Chinese stay `Lang::Zh` (e.g. `中文123`); leading `2024`
+/// stays English. Whitespace-only matches do not advance that “previous language” state so a
+/// space between `中文` and `123` does not flip context to English.
 pub fn lang_split(text: &str, jieba: &Jieba) -> Vec<Sentence> {
-    let segments = split_into_lang_segments(text);
     let mut sentences = Vec::with_capacity(16);
-    debug!("Lang segments: {:?}", segments);
+    let mut prev_lang: Option<Lang> = None;
+    debug!("Lang split: {}", text);
 
-    for (seg_lang, seg_text) in segments {
-        if seg_text.trim().is_empty() {
+    for m in TOKEN_REGEX.find_iter(text) {
+        let token = m.as_str();
+        if token.trim().is_empty() {
             continue;
         }
 
-        let words: Vec<&str> = match seg_lang {
-            Lang::Zh => jieba.cut(seg_text, true).into_iter().collect(),
-            Lang::En => vec![seg_text],
+        let has_han = HAN_ONLY.is_match(token);
+        let content_lang = if has_han { Lang::Zh } else { Lang::En };
+        let attaches_after_zh = is_numeric_or_punctuation(token)
+            || processor::parse_punctuation(token).is_some();
+        let token_lang = if prev_lang == Some(Lang::Zh) && attaches_after_zh {
+            Lang::Zh
+        } else {
+            content_lang
         };
 
-        if words.is_empty() {
-            continue;
-        }
+        let advances_prev = !token.chars().all(|c| c.is_whitespace());
 
-        // Process words for this segment into one Sentence (composed back)
-        for word in words {
-            processor::lang_process_token(&mut sentences, word, seg_lang);
+        if has_han {
+            for word in jieba.cut(token, true) {
+                if word.trim().is_empty() {
+                    continue;
+                }
+                processor::lang_process_token(&mut sentences, word, Lang::Zh);
+            }
+            if advances_prev {
+                prev_lang = Some(Lang::Zh);
+            }
+        } else {
+            processor::lang_process_token(&mut sentences, token, token_lang);
+            if advances_prev {
+                prev_lang = Some(token_lang);
+            }
         }
     }
 
     sentences
 }
 
-// Simplified regex for tokenization
 pub(crate) static TOKEN_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r#"(?x)
@@ -113,3 +85,5 @@ pub(crate) static TOKEN_REGEX: Lazy<Regex> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+static HAN_ONLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\p{Han}+$").unwrap());

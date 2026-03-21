@@ -3,16 +3,19 @@ use futures::{Stream, StreamExt};
 use hound::{WavReader, WavSpec};
 use log::{debug, info};
 use ndarray::{
-    Array, Array2, ArrayBase, ArrayD, ArrayView2, Axis, IxDyn, OwnedRepr, concatenate, s,
+    Array, Array1, Array2, ArrayBase, ArrayD, ArrayView2, Axis, IxDyn, OwnedRepr, concatenate,
+    s,
 };
 use ort::{
     inputs,
-    session::Session,
-    value::{Tensor, TensorRef},
+    session::{Session, SessionInputValue},
+    value::TensorRef,
 };
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use std::{fs::File, path::Path};
 use tokio::task::block_in_place;
@@ -41,6 +44,16 @@ const NUM_LAYERS: usize = 24;
 
 type KvDType = f32;
 
+static STANDALONE_TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn t2s_kv_io_names(num_layers: usize) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let ik = (0..num_layers).map(|i| format!("ik_cache_{}", i)).collect();
+    let iv = (0..num_layers).map(|i| format!("iv_cache_{}", i)).collect();
+    let k = (0..num_layers).map(|i| format!("k_cache_{}", i)).collect();
+    let v = (0..num_layers).map(|i| format!("v_cache_{}", i)).collect();
+    (ik, iv, k, v)
+}
+
 #[derive(Clone)]
 pub struct ReferenceData {
     ref_seq: Array2<i64>,
@@ -58,7 +71,11 @@ pub struct TTSModel {
     t2s_fs_decoder: Session,
     t2s_s_decoder: Session,
     sv: Option<SvModel>,
-    ref_data: Option<ReferenceData>,
+    ref_data: Option<Arc<ReferenceData>>,
+    t2s_dec_ik: Vec<String>,
+    t2s_dec_iv: Vec<String>,
+    t2s_k_cache_out: Vec<String>,
+    t2s_v_cache_out: Vec<String>,
     num_layers: usize,
     output_spec: WavSpec,
 }
@@ -87,7 +104,7 @@ impl TTSModel {
         sv_path: Option<P>,
     ) -> Result<Self, GSVError> {
         info!("Initializing TTSModel with ONNX sessions");
-        info!("use cpu cores: {:?}", BIG_CORES.clone());
+        info!("use cpu cores: {:?}", BIG_CORES.as_slice());
 
         // let create_session_with_profiling = |path: P| {
         //     Session::builder()?
@@ -112,6 +129,9 @@ impl TTSModel {
             sample_format: hound::SampleFormat::Float,
         };
 
+        let (t2s_dec_ik, t2s_dec_iv, t2s_k_cache_out, t2s_v_cache_out) =
+            t2s_kv_io_names(NUM_LAYERS);
+
         Ok(TTSModel {
             text_processor: TextProcessor::new(
                 G2PW::new(g2pw_path)?,
@@ -128,6 +148,10 @@ impl TTSModel {
                 None => None,
             },
             ref_data: None,
+            t2s_dec_ik,
+            t2s_dec_iv,
+            t2s_k_cache_out,
+            t2s_v_cache_out,
             num_layers: NUM_LAYERS,
             output_spec,
         })
@@ -140,7 +164,9 @@ impl TTSModel {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => block_in_place(|| handle.block_on(fut)),
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let rt = STANDALONE_TOKIO_RT.get_or_init(|| {
+                    tokio::runtime::Runtime::new().expect("failed to create tokio runtime")
+                });
                 rt.block_on(fut)
             }
         }
@@ -180,9 +206,13 @@ impl TTSModel {
         let (ref_audio_16k, ref_audio_32k) = read_and_resample_audio(&reference_audio_path)?;
         let ssl_content = self.process_ssl(&ref_audio_16k)?;
 
-        let sv_emb =  match &mut self.sv {
+        let sv_emb = match &mut self.sv {
             Some(sv_model) => {
-                let sv_emb = sv_model.infer(&ref_audio_16k.row(0).to_owned())?;
+                let row = ref_audio_16k.row(0);
+                let audio_slice = row
+                    .as_slice()
+                    .ok_or_else(|| GSVError::from("reference audio row must be contiguous"))?;
+                let sv_emb = sv_model.infer(audio_slice)?;
                 debug!("SV embedding shape: {:?}", sv_emb.shape());
                 Some(sv_emb)
             }
@@ -192,13 +222,13 @@ impl TTSModel {
             }
         };
 
-        self.ref_data = Some(ReferenceData {
+        self.ref_data = Some(Arc::new(ReferenceData {
             ref_seq,
             ref_bert,
             sv_emb,
             ref_audio_32k,
             ssl_content,
-        });
+        }));
 
         Ok(())
     }
@@ -249,42 +279,65 @@ impl TTSModel {
         let mut valid_len = initial_valid_len;
         y_vec.reserve(2048);
 
+        let y_len_arr = Array1::from_elem(1, prefix_len as i64);
+        let mut idx_arr = Array1::from_elem(1, 0i64);
+        let mut logits_scratch = Vec::with_capacity(VOCAB_SIZE + 2);
+
         loop {
-            // --- 1. Prepare inputs using views of the valid cache portion ---
-            // let time = SystemTime::now();
-            let mut inputs = inputs![
-                "iy" => TensorRef::from_array_view(unsafe {ArrayView2::from_shape_ptr((1, y_vec.len()), y_vec.as_ptr())}).unwrap(),
-                "y_len" => Tensor::from_array(Array::from_vec(vec![(prefix_len) as i64])).unwrap(),
-                "idx" => Tensor::from_array(Array::from_vec(vec![idx as i64])).unwrap(),
+            idx_arr[0] = idx as i64;
+
+            let iy = TensorRef::from_array_view(unsafe {
+                ArrayView2::from_shape_ptr((1, y_vec.len()), y_vec.as_ptr())
+            })
+            .unwrap();
+
+            let mut run_inputs: Vec<(Cow<'_, str>, SessionInputValue<'_>)> = vec![
+                (Cow::Borrowed("iy"), iy.into()),
+                (
+                    Cow::Borrowed("y_len"),
+                    TensorRef::from_array_view(y_len_arr.view()).unwrap().into(),
+                ),
+                (
+                    Cow::Borrowed("idx"),
+                    TensorRef::from_array_view(idx_arr.view()).unwrap().into(),
+                ),
             ];
 
             for i in 0..self.num_layers {
-                // Create a view of the valid part of the cache
                 let k_view = k_caches[i].slice(s![.., 0..valid_len, ..]);
                 let v_view = v_caches[i].slice(s![.., 0..valid_len, ..]);
 
-                inputs.push((
-                    format!("ik_cache_{}", i).into(),
+                run_inputs.push((
+                    Cow::Borrowed(self.t2s_dec_ik[i].as_str()),
                     TensorRef::from_array_view(k_view)?.into(),
                 ));
-                inputs.push((
-                    format!("iv_cache_{}", i).into(),
+                run_inputs.push((
+                    Cow::Borrowed(self.t2s_dec_iv[i].as_str()),
                     TensorRef::from_array_view(v_view)?.into(),
                 ));
             }
-            // --- 2. Run the decoder model for one step ---
-            let mut output = self.t2s_s_decoder.run(inputs)?;
 
-            let mut logits = output["logits"].try_extract_array_mut::<f32>()?;
-            let mut logits = logits.as_slice_mut().unwrap().to_owned();
+            let mut output = self.t2s_s_decoder.run(run_inputs)?;
 
-            if idx < 11 {
-                logits.pop();
+            {
+                let mut logits_arr = output["logits"].try_extract_array_mut::<f32>()?;
+                let src = logits_arr.as_slice_mut().unwrap();
+                logits_scratch.clear();
+                if idx < 11 {
+                    let keep = src.len().saturating_sub(1);
+                    logits_scratch.extend_from_slice(&src[..keep]);
+                } else {
+                    logits_scratch.extend_from_slice(src);
+                }
             }
 
-            y_vec.push(sampler.sample(&mut logits, &y_vec, &sampling_param));
+            y_vec.push(sampler.sample(
+                &mut logits_scratch,
+                &y_vec,
+                &sampling_param,
+            ));
 
-            let argmax = logits_sampler::argmax(&logits);
+            let argmax = logits_sampler::argmax(&logits_scratch);
 
             // --- 3. Check for reallocation and update caches ---
             let new_valid_len = valid_len + 1;
@@ -326,9 +379,9 @@ impl TTSModel {
             // Update KV caches by pasting the newly generated slice of data
             for i in 0..self.num_layers {
                 let inc_k_cache =
-                    output[format!("k_cache_{}", i)].try_extract_array::<KvDType>()?;
+                    output[self.t2s_k_cache_out[i].as_str()].try_extract_array::<KvDType>()?;
                 let inc_v_cache =
-                    output[format!("v_cache_{}", i)].try_extract_array::<KvDType>()?;
+                    output[self.t2s_v_cache_out[i].as_str()].try_extract_array::<KvDType>()?;
 
                 // The new data is the last row of the incremental output from the model
                 let k_new_slice = inc_k_cache.slice(s![.., valid_len, ..]);
@@ -418,8 +471,9 @@ impl TTSModel {
         ref_data: &ReferenceData,
         sampling_param: SamplingParams,
     ) -> Result<Vec<f32>, GSVError> {
-        let text_seq = Array2::from_shape_vec((1, text_seq_vec.len()), text_seq_vec.to_vec())?;
-        // let mut text_bert = Array2::<f32>::zeros((text_seq.shape()[1], 1024));
+        let text_seq: ArrayView2<'_, i64> =
+            ArrayView2::from_shape((1, text_seq_vec.len()), text_seq_vec)
+                .map_err(|_| GSVError::from("invalid text sequence layout"))?;
         let mut sampler = Sampler::new(VOCAB_SIZE);
 
         let prompts = {
@@ -433,20 +487,13 @@ impl TTSModel {
                 .into_owned()
         };
 
-        let x = concatenate(Axis(1), &[ref_data.ref_seq.view(), text_seq.view()])?.to_owned();
-        let bert = concatenate(
-            Axis(1),
-            &[
-                ref_data.ref_bert.clone().permuted_axes([1, 0]).view(),
-                text_bert.clone().permuted_axes([1, 0]).view(),
-            ],
-        )?;
+        let mut y_vec: Vec<i64> = prompts.iter().copied().collect();
+        let prefix_len = y_vec.len();
+
+        let x = concatenate(Axis(1), &[ref_data.ref_seq.view(), text_seq])?.into_owned();
+        let bert = concatenate(Axis(1), &[ref_data.ref_bert.t(), text_bert.t()])?;
 
         let bert = bert.insert_axis(Axis(0)).to_owned();
-
-        let (mut y_vec, _) = prompts.clone().into_raw_vec_and_offset();
-
-        let prefix_len = y_vec.len();
 
         let (y_vec, k_caches, v_caches, initial_seq_len) = {
             let time = SystemTime::now();
@@ -463,7 +510,8 @@ impl TTSModel {
 
             // --- Initialize large KV Caches ---
             // Get shape and initial data from the first-pass decoder.
-            let k_init_first = fs_decoder_output["k_cache_0"].try_extract_array::<KvDType>()?;
+            let k_init_first = fs_decoder_output[self.t2s_k_cache_out[0].as_str()]
+                .try_extract_array::<KvDType>()?;
             let initial_dims_dyn = k_init_first.raw_dim();
             let initial_seq_len = initial_dims_dyn[1];
 
@@ -475,9 +523,9 @@ impl TTSModel {
             let mut v_caches = Vec::with_capacity(self.num_layers);
 
             for i in 0..self.num_layers {
-                let k_init = fs_decoder_output[format!("k_cache_{}", i).to_string()]
+                let k_init = fs_decoder_output[self.t2s_k_cache_out[i].as_str()]
                     .try_extract_array::<KvDType>()?;
-                let v_init = fs_decoder_output[format!("v_cache_{}", i).to_string()]
+                let v_init = fs_decoder_output[self.t2s_v_cache_out[i].as_str()]
                     .try_extract_array::<KvDType>()?;
 
                 // Create large, zero-initialized caches.
@@ -518,13 +566,13 @@ impl TTSModel {
         // use sv_emb if have
         let outputs = match &ref_data.sv_emb {
             Some(sv_emb) => self.sovits.run(inputs![
-                "text_seq" => TensorRef::from_array_view(&text_seq)?,
+                "text_seq" => TensorRef::from_array_view(text_seq)?,
                 "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
                 "ref_audio" => TensorRef::from_array_view(&ref_data.ref_audio_32k)?,
                 "sv_emb" => TensorRef::from_array_view(sv_emb)?,
             ])?,
             None => self.sovits.run(inputs![
-                "text_seq" => TensorRef::from_array_view(&text_seq)?,
+                "text_seq" => TensorRef::from_array_view(text_seq)?,
                 "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
                 "ref_audio" => TensorRef::from_array_view(&ref_data.ref_audio_32k)?,
             ])?,
@@ -532,22 +580,19 @@ impl TTSModel {
         debug!("SoVITS all time: {:?}", time.elapsed()?);
         let output_audio = outputs["audio"].try_extract_array::<f32>()?;
         let (mut audio, _) = output_audio.into_owned().into_raw_vec_and_offset();
+        let mut max_audio = 0.0f32;
         for sample in &mut audio {
-            *sample = *sample * 4.0;
+            *sample *= 4.0;
+            if sample.is_finite() {
+                max_audio = max_audio.max(sample.abs());
+            }
         }
-        // Find the maximum absolute value in the audio
-        let max_audio = audio
-            .iter()
-            .filter(|&&x| x.is_finite()) // Ignore NaN or inf
-            .fold(0.0f32, |acc, &x| acc.max(x.abs()));
-        let audio = if max_audio > 1.0 {
-            audio
-                .into_iter()
-                .map(|x| x / max_audio)
-                .collect::<Vec<f32>>()
-        } else {
-            audio
-        };
+        if max_audio > 1.0 {
+            let inv = 1.0 / max_audio;
+            for x in &mut audio {
+                *x *= inv;
+            }
+        }
 
         Ok(audio)
     }
@@ -584,9 +629,9 @@ fn ensure_punctuation(text: &str) -> String {
     }
 }
 
-fn resample_audio(input: Vec<f32>, in_rate: u32, out_rate: u32) -> Result<Vec<f32>, GSVError> {
+fn resample_audio(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, GSVError> {
     if in_rate == out_rate {
-        return Ok(input);
+        return Ok(input.to_vec());
     }
     let mut resampler = SincFixedIn::new(
         out_rate as f64 / in_rate as f64,
@@ -605,7 +650,10 @@ fn resample_audio(input: Vec<f32>, in_rate: u32, out_rate: u32) -> Result<Vec<f3
     let output = resampler
         .process(&[input], None)
         .map_err(|e| GSVError::from(format!("Resampling failed: {}", e)))?;
-    Ok(output[0].clone())
+    output
+        .into_iter()
+        .next()
+        .ok_or_else(|| GSVError::from("resampler returned no channel"))
 }
 
 fn read_and_resample_audio<P: AsRef<Path>>(
@@ -636,9 +684,9 @@ fn read_and_resample_audio<P: AsRef<Path>>(
         ));
     }
 
-    // Resample to 16kHz and 32kHz
-    let mut ref_audio_16k = resample_audio(audio_samples.clone(), spec.sample_rate, 16000)?;
-    let ref_audio_32k = resample_audio(audio_samples, spec.sample_rate, 32000)?;
+    // Resample to 16kHz and 32kHz (single PCM buffer, no full clone between passes).
+    let mut ref_audio_16k = resample_audio(&audio_samples, spec.sample_rate, 16000)?;
+    let ref_audio_32k = resample_audio(&audio_samples, spec.sample_rate, 32000)?;
 
     // Prepend 0.3 seconds of silence
     let silence_16k = vec![0.0; (0.3 * 16000.0) as usize]; // 8000 samples for 16kHz
