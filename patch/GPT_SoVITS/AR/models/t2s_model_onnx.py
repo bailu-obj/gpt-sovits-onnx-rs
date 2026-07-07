@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics.classification import MulticlassAccuracy
-from AR.modules.embedding import SinePositionalEmbedding, TokenEmbedding
+from AR.modules.embedding_onnx import SinePositionalEmbedding, TokenEmbedding
 from AR.modules.transformer_onnx import LayerNorm, TransformerEncoder, TransformerEncoderLayer
 
 default_config = {
@@ -101,6 +101,7 @@ class T2SFirstStageDecoder(nn.Module):
         h,
         ar_predict_layer,
         num_layers,
+        num_head,
     ):
         super().__init__()
         self.ar_text_embedding = ar_text_embedding
@@ -111,6 +112,7 @@ class T2SFirstStageDecoder(nn.Module):
         self.h = h
         self.ar_predict_layer = ar_predict_layer
         self.num_layers = num_layers
+        self.num_head = num_head
 
     def forward(self, x, prompt, bert_feature):
         x = self.ar_text_embedding(x)
@@ -135,7 +137,7 @@ class T2SFirstStageDecoder(nn.Module):
                 value=False,
             )
         src_len = x_len + y_len
-        xy_attn_mask = torch.concat([x_attn_mask_pad, y_attn_mask], dim=0).unsqueeze(0).expand(16, -1, -1) .view(1, 16, src_len, src_len)
+        xy_attn_mask = torch.concat([x_attn_mask_pad, y_attn_mask], dim=0).unsqueeze(0).expand(self.num_head, -1, -1).view(1, self.num_head, src_len, src_len)
         xy_dec, k_cache, v_cache = self.h(xy_pos, mask=xy_attn_mask, k_cache=None, v_cache=None, first_infer=True)
         logits = self.ar_predict_layer(xy_dec[:, -1])
         # samples = sample(logits[0], y,top_k=self.top_k, top_p = 1.0, temperature=1.0)[0].unsqueeze(0) # 避免句首不稳定
@@ -209,6 +211,7 @@ class Text2SemanticDecoder(nn.Module):
             self.h,
             self.ar_predict_layer,
             self.num_layers,
+            self.num_head,
         )
         self.stage_decoder = T2SStageDecoder(
             self.ar_audio_embedding,

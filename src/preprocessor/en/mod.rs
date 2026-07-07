@@ -1,9 +1,10 @@
-use crate::preprocessor::{en::g2p_en::G2pEn, phone_symbol::get_phone_symbol};
+use crate::preprocessor::en::{g2p_en::G2pEn, normalize::text_normalize_en};
 use anyhow::Result;
 use log::debug;
 use std::borrow::Cow;
 
 pub mod g2p_en;
+pub mod normalize;
 
 #[derive(PartialEq, Eq, Clone)]
 pub enum EnWord {
@@ -30,54 +31,41 @@ pub struct EnSentence {
 
 impl EnSentence {
     pub fn g2p(&mut self, g2p_en: &mut G2pEn) -> Result<()> {
+        let raw = self.get_text_string();
+        let normalized = text_normalize_en(&raw);
+        self.g2p_from_normalized(g2p_en, &normalized)
+    }
+
+    /// Phonemize already-normalized English text; phoneme_finalize happens via phoneme_finalize::finalize_span_en.
+    pub fn g2p_from_normalized(&mut self, g2p_en: &mut G2pEn, normalized: &str) -> Result<()> {
         self.phones.clear();
         self.phone_ids.clear();
         self.word2ph.clear();
-        for word in &self.text {
-            match word {
-                EnWord::Word(w) => {
-                    let phonemes = g2p_en.g2p(w)?;
-                    let mut cnt = 0;
-                    for ph in phonemes {
-                        self.phones.push(Cow::Owned(ph.clone()));
-                        self.phone_ids.push(get_phone_symbol(&ph));
-                        cnt += 1;
-                        if ph.contains("0")
-                            || ph.contains("1")
-                            || ph.contains("2")
-                            || ph.contains("3")
-                            || ph.contains("4")
-                        {
-                            self.word2ph.push(cnt);
-                            cnt = 0;
-                        }
-                    }
-                    if cnt > 0 {
-                        self.word2ph.push(cnt);
-                    }
-                }
-                EnWord::Punctuation(p) => {
-                    self.phones.push(Cow::Borrowed(p));
-                    self.phone_ids.push(get_phone_symbol(p));
-                    self.word2ph.push(1);
-                }
-            };
+
+        let phonemes = g2p_en.g2p(normalized)?;
+        let (phone_ids, word2ph) =
+            crate::preprocessor::phoneme_finalize::finalize_span_en(phonemes);
+
+        self.phone_ids = phone_ids;
+        self.word2ph = word2ph;
+        for id in &self.phone_ids {
+            self.phones.push(Cow::Owned(id.to_string()));
         }
-        debug!("EnSentence phones: {:?}", self.phones);
+
         debug!("EnSentence phone_ids: {:?}", self.phone_ids);
-        debug!("EnSentence word2ph: {:?}", self.word2ph);
         Ok(())
     }
 
-    pub fn build_phone(&self) -> Result<Vec<i64>> {
-        Ok(self.phone_ids.clone())
-    }
-
     pub fn get_text_string(&self) -> String {
-        let mut result = String::with_capacity(self.text.len() * 5); // Estimate capacity
+        let mut result = String::with_capacity(self.text.len() * 5);
         for w in &self.text {
             match w {
-                EnWord::Word(s) => result.push_str(s),
+                EnWord::Word(s) => {
+                    if !result.is_empty() && !result.ends_with(' ') {
+                        result.push(' ');
+                    }
+                    result.push_str(s);
+                }
                 EnWord::Punctuation(p) => result.push_str(p),
             }
         }

@@ -39,6 +39,7 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_initModel
     t2s_fs_decoder_path: JString,
     t2s_s_decoder_path: JString,
     bert_path: JString,
+    sv_path: JString,
 ) -> jlong {
     init_logging();
     // Convert JString to Rust String with error handling
@@ -132,6 +133,25 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_initModel
         }
     };
 
+    let sv: Option<String> = match env.get_string(&sv_path) {
+        Ok(s) => {
+            let s: String = s.into();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        Err(e) => {
+            env.throw_new(
+                "java/lang/IllegalArgumentException",
+                format!("Couldn't get sv path: {}", e),
+            )
+            .expect("Failed to throw exception");
+            return 0;
+        }
+    };
+
     match TTSModel::new(
         Path::new(&vits),
         Path::new(&ssl),
@@ -141,6 +161,7 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_initModel
         Some(Path::new(&bert)),
         Some(Path::new(&g2p_w)),
         Some(Path::new(&g2p_en)),
+        sv.as_deref().map(Path::new),
     ) {
         Ok(model) => Box::into_raw(Box::new(model)) as jlong,
         Err(e) => {
@@ -238,6 +259,7 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_runInfere
         &text,
         SamplingParamsBuilder::new().top_k(4).top_p(0.9).temperature(1.0).repetition_penalty(1.35).build(),
         lang_id,
+        PostprocessParams::default(),
     ) {
         Ok((_, samples_vec)) => {
             // Fix deprecated into_raw_vec

@@ -8,3 +8,4 @@ onnxruntime-1.22.0/
 MNN*
 .vscode/
 onnx_build/
+gpt-sovits-upstream/

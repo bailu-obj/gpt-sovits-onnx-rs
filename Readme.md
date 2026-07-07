@@ -30,6 +30,8 @@
 
 2026-03-21: 优化了中英文混合效果（借助Cursor自动化编写）
 
+2026-07-08: 重构推理预处理管线，对齐 Python TextPreprocessor/chinese2：tone sandhi、erhua、分段切句、短句补齐、英文 num2en、parity 测试。
+
 2026-01-25: 测试了ort_rc11,但是在mac（arm）上性能更差（-10%），目前将deps固定在了ort_rc10。参见[update/ort_rc_11](https://github.com/bailu-obj/gpt-sovits-onnx-rs/tree/update/ort_rc_11)分支  
 
 2025-11-06: 初步支持V2Pro模型，详情请见转换脚本。目前V2Pro的精度和速度仍未优化，且android平台仍未验证。
@@ -84,8 +86,45 @@
 
 > **版权声明**：此模型使用了受版权保护的音视频素材进行微调，请勿用于任何商业用途。
 
-**gp2en模型下载** 建议下载，参见[cisco-ai/mini-bart-g2p](https://huggingface.co/cisco-ai/mini-bart-g2p/tree/main/onnx),下载完成后可以把模型目录文件夹设置为TTSModel的g2p_en_path参数，启用gp2 en模型支持。默认的demo和JNI都启用了gp2 en模型，需要在原来的目录下新建一个g2p_en文件夹，把下载的模型放进去。
+**gp2en模型下载** 建议下载，参见[cisco-ai/mini-bart-g2p](https://huggingface.co/cisco-ai/mini-bart-g2p/tree/main/onnx),下载完成后可以把模型目录文件夹设置为TTSModel的g2p_en_path参数，启用gp2 en模型支持。默认的demo和JNI都启用了gp2 en模型，需要在原来的目录下新建一个g2p_en文件夹，把下载的模型放进去。（macOS 导出流程会在 `04_download_models.sh` 自动下载 g2p_en。）
 
+### 参考音频（ref.wav）
+
+`gpt_sovits_demo` 会从模型目录读取 `ref.wav` 作为参考音色。可使用我们之前配套的示例音频：
+
+- 文件：[mikv39/gpt-sovits-onnx-custom — ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav)
+- 建议参考文本（与示例音频匹配）：`格式化，可以给自家的奶带来大量的。`
+
+下载到模型目录（与 `custom_vits.onnx` 等同级）：
+
+```bash
+MODEL_DIR=/path/to/onnx-patched/custom
+curl -fL -o "${MODEL_DIR}/ref.wav" \
+  https://huggingface.co/mikv39/gpt-sovits-onnx-custom/resolve/main/ref.wav
+```
+
+运行 demo 时指定对应 `--ref-text`：
+
+```bash
+cargo run --release --example gpt_sovits_demo -- \
+  --model-path "${MODEL_DIR}" \
+  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --text "今天天气真不错。"
+```
+
+参考音频建议 **3–10 秒**；过长可能导致上游训练/推理报错。
+
+### 预处理说明
+
+| 组件 | 路径参数 | 作用 |
+|------|----------|------|
+| `bert.onnx` | `bert_path` | 中文 BERT 特征（缺失时用零向量，语速/韵律下降） |
+| `g2pW.onnx` | `g2pw_path` | 多音字 G2PW（缺失时用字典 fallback） |
+| `g2p_en/` | `g2p_en_path` | 英文 G2P ONNX（缺失时用 CMUdict） |
+
+- `LangId::Auto`：普通话 + 英文自动分词
+- `LangId::AutoYue`：粤语模式
+- 预处理与 Python 版对照：见 [scripts/README.md](scripts/README.md) 中的 parity 测试说明
 
 -----
 
@@ -95,6 +134,18 @@
 
 请参考 `scripts` 目录下的说明文档：[scripts/README.md](scripts/README.md)。
 
+**macOS 分阶段导出**（逐步运行，避免长时间一键等待）：
+
+```bash
+./scripts/export/01_clone.sh
+./scripts/export/02_patch.sh
+./scripts/export/03_setup_env.sh --source HF
+./scripts/export/04_download_models.sh --version v2Pro
+./scripts/export/05_export.sh --version v2Pro --export-name custom --no-quant
+```
+
+详见 [scripts/README.md — macOS 分阶段导出](scripts/README.md#macos-分阶段导出)。
+
 ### 2\. x86 平台构建和运行 (Linux/Windows/macOS)
 
 直接使用 Cargo 即可完成编译：
@@ -103,9 +154,13 @@
 cargo build --release
 ```
 
-使用如下命令可以运行命令行demo，该demo会自动根据模型路径下转换的模型文件，启用v2或v2Pro模型：
+使用如下命令可以运行命令行demo，该demo会自动根据模型路径下转换的模型文件，启用v2或v2Pro模型。需先将 [ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav) 下载到模型目录，见上文「参考音频」一节。
+
 ```bash
-RUST_LOG=Debug ./target/release/examples/gpt_sovits_demo --model-path /Users/neko/projects/ --text "你好啊，我最喜欢你了"
+RUST_LOG=Debug cargo run --release --example gpt_sovits_demo -- \
+  --model-path /path/to/onnx-patched/custom \
+  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --text "你好啊，我最喜欢你了"
 ```
 
 ### 3\. Android 平台构建

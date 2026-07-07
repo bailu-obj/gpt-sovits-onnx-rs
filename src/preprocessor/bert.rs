@@ -41,11 +41,16 @@ impl BertModel {
             let tmp = self.get_real_bert(text, word2ph)?;
             debug!("use real bert, {}", text);
             if tmp.shape()[0] != total_phones {
-                warn!(
-                    "tmp.shape()[0]: {} != total_phones: {}, use empty",
-                    tmp.shape()[0],
-                    total_phones
+                let error_msg = format!(
+                    "BERT output length mismatch for text '{}': expected {}, got {}",
+                    text,
+                    total_phones,
+                    tmp.shape()[0]
                 );
+                warn!("{}", error_msg);
+                if cfg!(debug_assertions) {
+                    return Err(anyhow::anyhow!(error_msg));
+                }
                 return Ok(self.get_fake_bert(total_phones));
             }
             Ok(tmp)

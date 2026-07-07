@@ -1,8 +1,6 @@
 // preprocessor/utils.rs
 use std::collections::HashMap;
 
-use ndarray::{ArrayView, IntoDimension, IxDyn};
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PolyChar {
     pub index: usize,
@@ -16,7 +14,6 @@ pub struct MonoChar {
 
 pub static MONO_CHARS_DIST_STR: &str = include_str!("../../resource/g2pw/dict_mono_chars.json");
 pub static POLY_CHARS_DIST_STR: &str = include_str!("../../resource/g2pw/dict_poly_chars.json");
-pub static DEFAULT_ZH_WORD_DICT: &str = include_str!("../../resource/zh_word_dict.json");
 pub static BERT_TOKENIZER: &str = include_str!("../../resource/g2pw_tokenizer.json");
 
 pub fn load_mono_chars() -> HashMap<char, MonoChar> {
@@ -44,41 +41,9 @@ lazy_static::lazy_static! {
     pub static ref DICT_POLY_CHARS: HashMap<char, PolyChar> = load_poly_chars();
 }
 
-#[inline]
-pub fn char_is_chinese(c: char) -> bool {
-    DICT_MONO_CHARS.contains_key(&c) || DICT_POLY_CHARS.contains_key(&c)
-}
+use ndarray::{ArrayView, IntoDimension, IxDyn};
 
-pub fn str_is_chinese(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(char_is_chinese)
-}
-
-pub fn str_is_numeric(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_digit())
-}
-pub fn str_is_punctuation(s: &str) -> bool {
-    let punctuations = [
-        ",", ".", "!", "?", ";", ":", "'", "\"", "(", ")", "[", "]", "<", ">", "-", "~", "...",
-        "·", "、", "$", "/",
-    ];
-    punctuations.contains(&s)
-}
-
-#[inline]
-pub fn char_is_numeric_or_punct(c: char) -> bool {
-    c.is_ascii_digit()
-        || matches!(
-            c,
-            ',' | '.' | '!' | '?' | ';' | ':' | '\'' | '"' | '(' | ')' | '[' | ']' | '<' | '>'
-                | '-' | '~' | '·' | '、' | '$' | '/'
-        )
-}
-
-pub fn is_numeric_or_punctuation(s: &str) -> bool {
-    s.chars().all(char_is_numeric_or_punct)
-}
-
-// Finds the index of the maximum value in a 2D tensor
+/// Finds the index of the maximum value in a 2D tensor.
 pub fn argmax(tensor: &ArrayView<f32, IxDyn>) -> (usize, usize) {
     let mut max_index = (0, 0);
     let mut max_value = tensor

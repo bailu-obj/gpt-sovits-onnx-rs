@@ -877,7 +877,8 @@ class SynthesizerTrn(nn.Module):
             self.prelu = nn.PReLU(num_parameters=gin_channels)
 
     def forward(self, codes, text, refer, noise_scale=0.5, speed=1, sv_emb=None):
-        refer_mask = torch.ones_like(refer[:1, :1, :])
+        refer_lengths = torch.LongTensor([refer.size(2)]).to(refer.device)
+        refer_mask = torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(refer.dtype)
         if self.version == "v1":
             ge = self.ref_enc(refer * refer_mask, refer_mask)
         else:
@@ -889,8 +890,7 @@ class SynthesizerTrn(nn.Module):
 
         quantized = self.quantizer.decode(codes)
         if self.semantic_frame_rate == "25hz":
-            dquantized = torch.cat([quantized, quantized]).permute(1, 2, 0)
-            quantized = dquantized.contiguous().view(1, self.ssl_dim, -1)
+            quantized = F.interpolate(quantized, size=int(quantized.shape[-1] * 2), mode="nearest")
 
         if self.is_v2pro:
             ge_ = self.ge_to512(ge.transpose(2, 1)).transpose(2, 1)

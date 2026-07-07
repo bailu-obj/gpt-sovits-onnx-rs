@@ -18,6 +18,25 @@ import torch.nn.functional as F
 from AR.models.t2s_model_onnx import sample
 from sv import SV
 import kaldi as Kaldi
+from process_ckpt import get_sovits_version_from_path_fast
+
+V2PRO_SET = {"v2Pro", "v2ProPlus"}
+
+# PyTorch 2.6+ defaults to dynamo/torch.export ONNX; GPT-SoVITS needs legacy export.
+_LEGACY_ONNX_KWARGS = {"dynamo": False}
+
+
+def is_v2pro(version: str) -> bool:
+    return version in V2PRO_SET
+
+
+def resolve_version(vits_path: str, version: str, auto_version: bool) -> str:
+    if not auto_version:
+        return version
+    detected = get_sovits_version_from_path_fast(vits_path)
+    print(f"Auto-detected SoVITS version: {detected}")
+    return detected
+
 
 sv_cn_model = None
 
@@ -95,7 +114,7 @@ class T2SEncoder(nn.Module):
 class T2SModel(nn.Module):
     def __init__(self, t2s_path, vits_model):
         super().__init__()
-        dict_s1 = torch.load(t2s_path, map_location="cpu")
+        dict_s1 = torch.load(t2s_path, map_location="cpu", weights_only=False)
         self.config = dict_s1["config"]
         self.t2s_model = Text2SemanticLightningModule(self.config, "ojbk", is_train=False)
         self.t2s_model.load_state_dict(dict_s1["weight"])
@@ -135,7 +154,7 @@ class T2SModel(nn.Module):
             if stop:
                 break
         y[0, -1] = 0
-        return y[:, -idx:].unsqueeze(0)
+        return y[:, prefix_len:].unsqueeze(0)
 
     def export(self, ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name):
         torch.onnx.export(
@@ -148,6 +167,7 @@ class T2SModel(nn.Module):
                 "ssl_content": {2: "ssl_length"},
             },
             opset_version=20,
+            **_LEGACY_ONNX_KWARGS,
         )
         
         prompts = self.onnx_encoder(ssl_content)
@@ -176,7 +196,8 @@ class T2SModel(nn.Module):
                 "bert": {2: "bert_length"},
             },
             verbose=False,
-            opset_version=20
+            opset_version=20,
+            **_LEGACY_ONNX_KWARGS,
         )
         logits, k_cache, v_cache  = self.first_stage_decoder(x, prompts, bert)
         samples = sample(logits, prompts,top_k=15, top_p = 1.0, temperature=1.0)[0].unsqueeze(0)
@@ -197,7 +218,8 @@ class T2SModel(nn.Module):
                 **{f"iv_cache_{i}": {1: "kv_length"} for i in range(num_layers)},
             },
             verbose=False,
-            opset_version=20
+            opset_version=20,
+            **_LEGACY_ONNX_KWARGS,
         )
         
 
@@ -243,7 +265,7 @@ class GptSoVits(nn.Module):
     
     def forward(self, ref_seq, text_seq, ref_bert, text_bert, ref_audio, ssl_content):
         pred_semantic = self.t2s(ref_seq, text_seq, ref_bert, text_bert, ssl_content)
-        if self.version == "v2Pro":
+        if is_v2pro(self.version):
             audio_16k = torchaudio.functional.resample(ref_audio, self.vits.hps.data.sampling_rate, 16000).float()
             audio_feature = Kaldi.fbank(audio_16k, num_mel_bins=80, sample_frequency=16000, dither=0)
             sv_emb = self.sv_model(audio_feature)
@@ -254,7 +276,7 @@ class GptSoVits(nn.Module):
     def export(self, ref_seq, text_seq, ref_bert, text_bert, ref_audio, ssl_content, project_name):
         self.t2s.export(ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name)
         pred_semantic = self.t2s(ref_seq, text_seq, ref_bert, text_bert, ssl_content)
-        if self.version == "v2Pro":
+        if is_v2pro(self.version):
             dummy_audio_16k = torchaudio.functional.resample(ref_audio, self.vits.hps.data.sampling_rate, 16000).float()
             audio_feature = Kaldi.fbank(dummy_audio_16k, num_mel_bins=80, sample_frequency=16000, dither=0)
             print("Exporting SV model...")
@@ -271,6 +293,7 @@ class GptSoVits(nn.Module):
                 },
                 opset_version=20,
                 verbose=False,
+                **_LEGACY_ONNX_KWARGS,
             )
             torch.onnx.export(
                 self.vits,
@@ -284,7 +307,8 @@ class GptSoVits(nn.Module):
                     "ref_audio": {1: "audio_length"},
                 },
                 opset_version=20,
-                verbose=False
+                verbose=False,
+                **_LEGACY_ONNX_KWARGS,
             )
         else:
             torch.onnx.export(
@@ -299,7 +323,8 @@ class GptSoVits(nn.Module):
                     "ref_audio": {1: "audio_length"},
                 },
                 opset_version=20,
-                verbose=False
+                verbose=False,
+                **_LEGACY_ONNX_KWARGS,
             )
 
 class SSLModel(nn.Module):
@@ -406,6 +431,7 @@ def export_bert(project_name):
         },
         opset_version=20,
         verbose=False,
+        **_LEGACY_ONNX_KWARGS,
     )
     print("#### exported bert ####")
 
@@ -414,7 +440,7 @@ def export(vits_path, gpt_path, project_name, vits_model="v2"):
     vits = VitsModel(vits_path, version=vits_model)
     gpt = T2SModel(gpt_path, vits)
     sv_model = None
-    if vits_model == "v2Pro":
+    if is_v2pro(vits_model):
         init_sv_cn("cpu", False)
         sv_model = ExportERes2NetV2(sv_cn_model)
     gpt_sovits = GptSoVits(vits, gpt, sv_model=sv_model, version=vits_model)
@@ -444,7 +470,8 @@ def export(vits_path, gpt_path, project_name, vits_model="v2"):
             "ref_audio_16k": {1: "audio_length"},
         },
         opset_version=20,
-        verbose=False
+        verbose=False,
+        **_LEGACY_ONNX_KWARGS,
     )
     export_bert(project_name)
     gpt_sovits.export(ref_seq, text_seq, ref_bert, text_bert, ref_audio_sr, ssl_content, project_name)
@@ -468,6 +495,7 @@ def export(vits_path, gpt_path, project_name, vits_model="v2"):
         "BertPath": "chinese-roberta-wwm-ext-large",
         "AddBlank": False,
         "Version": vits_model,
+        "IsV2Pro": is_v2pro(vits_model),
     }
 
     with open(f"onnx/{project_name}.json", 'w') as MoeVsConfFile:
@@ -478,7 +506,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export model to ONNX")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model directory")
     parser.add_argument("--export_name", type=str, required=True, help="Project Name for the exported model")
-    parser.add_argument("--version", type=str, default="v2", help="vits model version: v2 or v2Pro")
+    parser.add_argument(
+        "--version",
+        type=str,
+        default="v2",
+        help="vits model version: v2, v2Pro, or v2ProPlus",
+    )
+    parser.add_argument(
+        "--auto-version",
+        action="store_true",
+        help="detect version from sovits.pth via process_ckpt",
+    )
     args = parser.parse_args()
 
     try:
@@ -487,7 +525,8 @@ if __name__ == "__main__":
         pass
     gpt_path = os.path.join(args.model_path, "gpt.ckpt")
     vits_path = os.path.join(args.model_path, "sovits.pth")
+    version = resolve_version(vits_path, args.version, args.auto_version)
     with torch.no_grad():
-        export(vits_path, gpt_path, args.export_name, args.version)
+        export(vits_path, gpt_path, args.export_name, version)
 
     # soundfile.write("out.wav", a, vits.hps.data.sampling_rate)

@@ -1,10 +1,10 @@
 // preprocessor/num.rs
-use std::collections::LinkedList;
+//
+// Chinese number expansion via pest grammar (`resource/rule.pest`).
+// Unit-suffixed patterns (年/元/%) are handled by regex in `text_normalize.rs`.
 
 use anyhow::{Result, bail};
 use pest::Parser;
-
-use crate::preprocessor::Lang;
 
 #[derive(pest_derive::Parser)]
 #[grammar = "resource/rule.pest"]
@@ -267,312 +267,27 @@ pub mod zh {
     }
 }
 
-pub mod en {
-    use super::*;
-    use pest::iterators::Pair;
-
-    const SEPARATOR: &str = " ";
-
-    fn parse_pn(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::pn);
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        match pair.as_str() {
-            "+" => dst_string.push_str("plus"),
-            "-" => dst_string.push_str("minus"),
-            "*" | "×" => dst_string.push_str("times"),
-            "/" | "÷" => {
-                dst_string.push_str("divided by");
-            }
-            "=" => dst_string.push_str("is"),
-            _ => bail!("Unknown operator: {:?}", pair.as_str()),
-        }
-        Ok(())
+/// Expand a bare numeric token to Chinese words (pest grammar).
+pub fn expand_zh(token: &str) -> String {
+    NumSentence {
+        text: token.to_string(),
     }
-
-    fn parse_flag(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::flag);
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        match pair.as_str() {
-            "-" => dst_string.push_str("negative"),
-            _ => bail!("Unknown flag: {:?}", pair.as_str()),
-        }
-        Ok(())
-    }
-
-    fn parse_percent(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::percent);
-        let inner = pair.into_inner();
-        for pair in inner {
-            match pair.as_rule() {
-                Rule::decimals => parse_decimals(pair, dst_string)?,
-                Rule::integer => parse_integer(pair, dst_string, true)?,
-                _ => bail!("Unknown rule in percent: {:?}", pair.as_str()),
-            }
-        }
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        dst_string.push_str("percent");
-        Ok(())
-    }
-
-    fn parse_integer(pair: Pair<Rule>, dst_string: &mut String, unit: bool) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::integer);
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-
-        // Note: Replace with proper num2en::str_to_words if available
-        let digits: Vec<_> = pair.into_inner().collect();
-        for pair in digits {
-            let txt = match pair.as_str() {
-                "0" => "zero",
-                "1" => "one",
-                "2" => "two",
-                "3" => "three",
-                "4" => "four",
-                "5" => "five",
-                "6" => "six",
-                "7" => "seven",
-                "8" => "eight",
-                "9" => "nine",
-                _ => bail!("Unknown digit: {:?}", pair.as_str()),
-            };
-            dst_string.push_str(txt);
-            if unit && !dst_string.is_empty() {
-                dst_string.push_str(SEPARATOR);
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_decimals(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::decimals);
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-
-        let mut inner = pair.into_inner().rev();
-        let f_part = inner.next().unwrap();
-        if let Some(i_part) = inner.next() {
-            parse_integer(i_part, dst_string, true)?;
-        } else {
-            dst_string.push_str("zero");
-        }
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        dst_string.push_str("point");
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        parse_integer(f_part, dst_string, false)?;
-        Ok(())
-    }
-
-    fn parse_fractional(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::fractional);
-        let mut inner = pair.into_inner();
-        let numerator = inner.next().unwrap();
-        let denominator = inner.next().unwrap();
-        parse_integer(numerator, dst_string, true)?;
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        dst_string.push_str("over");
-        if !dst_string.is_empty() {
-            dst_string.push_str(SEPARATOR);
-        }
-        parse_integer(denominator, dst_string, true)?;
-        Ok(())
-    }
-
-    fn parse_num(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::num);
-        let inner = pair.into_inner();
-        for pair in inner {
-            match pair.as_rule() {
-                Rule::flag => parse_flag(pair, dst_string)?,
-                Rule::percent => parse_percent(pair, dst_string)?,
-                Rule::decimals => parse_decimals(pair, dst_string)?,
-                Rule::fractional => parse_fractional(pair, dst_string)?,
-                Rule::integer => parse_integer(pair, dst_string, true)?,
-                _ => bail!("Unknown rule in num: {:?}", pair.as_str()),
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_signs(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::signs);
-        let inner = pair.into_inner();
-        for pair in inner {
-            match pair.as_rule() {
-                Rule::num => parse_num(pair, dst_string)?,
-                Rule::pn => parse_pn(pair, dst_string)?,
-                Rule::word => {}
-                _ => bail!("Unknown rule in signs: {:?}", pair.as_str()),
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_link(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::link);
-        Ok(())
-    }
-
-    fn parse_word(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::word);
-        let inner = pair.into_inner();
-        for pair in inner {
-            match pair.as_rule() {
-                Rule::digit => {
-                    let txt = match pair.as_str() {
-                        "0" => "zero",
-                        "1" => "one",
-                        "2" => "two",
-                        "3" => "three",
-                        "4" => "four",
-                        "5" => "five",
-                        "6" => "six",
-                        "7" => "seven",
-                        "8" => "eight",
-                        "9" => "nine",
-                        _ => bail!("Unknown digit: {:?}", pair.as_str()),
-                    };
-                    if !dst_string.is_empty() {
-                        dst_string.push_str(SEPARATOR);
-                    }
-                    dst_string.push_str(txt);
-                }
-                Rule::alpha => {
-                    if !dst_string.is_empty() {
-                        dst_string.push_str(SEPARATOR);
-                    }
-                    dst_string.push_str(pair.as_str());
-                }
-                Rule::greek => {
-                    let txt = match pair.as_str() {
-                        "α" | "Α" => "alpha",
-                        "β" | "Β" => "beta",
-                        "γ" | "Γ" => "gamma",
-                        "δ" | "Δ" => "delta",
-                        "ε" | "Ε" => "epsilon",
-                        "ζ" | "Ζ" => "zeta",
-                        "η" | "Η" => "eta",
-                        "θ" | "Θ" => "theta",
-                        "ι" | "Ι" => "iota",
-                        "κ" | "Κ" => "kappa",
-                        "λ" | "Λ" => "lambda",
-                        "μ" | "Μ" => "mu",
-                        "ν" | "Ν" => "nu",
-                        "ξ" | "Ξ" => "xi",
-                        "ο" | "Ο" => "omicron",
-                        "π" | "Π" => "pi",
-                        "ρ" | "Ρ" => "rho",
-                        "σ" | "Σ" => "sigma",
-                        "τ" | "Τ" => "tau",
-                        "υ" | "Υ" => "upsilon",
-                        "φ" | "Φ" => "phi",
-                        "χ" | "Χ" => "chi",
-                        "ψ" | "Ψ" => "psi",
-                        "ω" | "Ω" => "omega",
-                        _ => bail!("Unknown Greek letter: {:?}", pair.as_str()),
-                    };
-                    if !dst_string.is_empty() {
-                        dst_string.push_str(SEPARATOR);
-                    }
-                    dst_string.push_str(txt);
-                }
-                _ => bail!("Unknown rule in word: {:?}", pair.as_str()),
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_ident(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::ident);
-        let inner = pair.into_inner();
-        for pair in inner {
-            match pair.as_rule() {
-                Rule::word => parse_word(pair, dst_string)?,
-                Rule::link => parse_link(pair, dst_string)?,
-                _ => bail!("Unknown rule in ident: {:?}", pair.as_str()),
-            }
-        }
-        Ok(())
-    }
-
-    pub fn parse_all(pair: Pair<Rule>, dst_string: &mut String) -> Result<()> {
-        assert_eq!(pair.as_rule(), Rule::all);
-        let inner = pair.into_inner();
-        for pair in inner {
-            match pair.as_rule() {
-                Rule::signs => parse_signs(pair, dst_string)?,
-                Rule::ident => parse_ident(pair, dst_string)?,
-                _ => bail!("Unknown rule in all: {:?}", pair.as_str()),
-            }
-        }
-        Ok(())
-    }
+    .to_lang_text()
+    .unwrap_or_else(|_| token.to_string())
 }
 
 #[derive(Debug)]
 pub struct NumSentence {
     pub text: String,
-    pub lang: Lang,
 }
 
-static NUM_OP: [char; 8] = ['+', '-', '*', '×', '/', '÷', '=', '%'];
-
 impl NumSentence {
-    pub fn need_drop(&self) -> bool {
-        let num_text = self.text.trim();
-        num_text.is_empty() || num_text.chars().all(|c| NUM_OP.contains(&c))
-    }
-
-    pub fn is_link_symbol(&self) -> bool {
-        self.text == "-"
-    }
-
     pub fn to_lang_text(&self) -> Result<String> {
         let mut dst_string = String::new();
         let pairs = ExprParser::parse(Rule::all, &self.text)?;
         for pair in pairs {
-            match self.lang {
-                Lang::Zh => zh::parse_all(pair, &mut dst_string)?,
-                Lang::En => en::parse_all(pair, &mut dst_string)?,
-            }
+            zh::parse_all(pair, &mut dst_string)?;
         }
         Ok(dst_string.trim().to_string())
     }
-}
-
-/// True when the whole token should be spoken as a number (not mixed CJK text like `第10章`,
-/// nor alphanumeric tokens like `v2` that need regex splitting).
-pub fn is_numeric(p: &str) -> bool {
-    let p = p.trim();
-    if p.is_empty() {
-        return false;
-    }
-    if p.chars().any(|c| {
-        matches!(
-            c,
-            '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}' | '\u{20000}'..='\u{2ceaf}'
-        )
-    }) {
-        return false;
-    }
-    let has_ascii_letter = p.chars().any(|c| c.is_ascii_alphabetic());
-    let has_ascii_digit = p.chars().any(|c| c.is_ascii_digit());
-    if has_ascii_letter && has_ascii_digit {
-        return false;
-    }
-    p.chars()
-        .any(|c| c.is_numeric() || matches!(c, 'α'..='ω' | 'Α'..='Ω'))
 }

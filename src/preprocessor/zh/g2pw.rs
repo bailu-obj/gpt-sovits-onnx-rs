@@ -56,10 +56,27 @@ impl G2PW {
     pub fn g2p<'s>(&mut self, text: &'s str) -> Vec<G2PWOut> {
         if self.model.is_some() && self.tokenizers.is_some() {
             self.get_pinyin_ml(text)
-                .unwrap_or(self.simple_get_pinyin(text))
+                .unwrap_or_else(|_| self.simple_get_pinyin(text))
         } else {
             self.simple_get_pinyin(text)
         }
+    }
+
+    /// Batch G2PW for multiple segments (Python g2pw._g2pw batch path).
+    pub fn g2p_batch(&mut self, texts: &[&str]) -> Vec<Vec<String>> {
+        texts
+            .iter()
+            .map(|&text| {
+                self.g2p(text)
+                    .into_iter()
+                    .map(|out| match out {
+                        G2PWOut::Pinyin(p) => p,
+                        G2PWOut::RawChar(c) => c.to_string(),
+                        G2PWOut::Yue(p) => p,
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     pub fn simple_get_pinyin(&self, text: &str) -> Vec<G2PWOut> {

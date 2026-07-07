@@ -107,6 +107,7 @@ fn run_sync_inference(
             text,
             SamplingParamsBuilder::new().top_k(4).top_p(0.9).temperature(1.0).repetition_penalty(1.35).build(),
             lang_id,
+            PostprocessParams::default(),
         )?;
         if i == runs - 1 {
             write_wav(spec, &samples, output_file)?;

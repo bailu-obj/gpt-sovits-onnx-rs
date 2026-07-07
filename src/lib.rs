@@ -24,14 +24,18 @@ mod cpu_info;
 mod error;
 mod logits_sampler;
 mod onnx_builder;
+mod postprocess;
 mod preprocessor;
 mod sv;
 
 use onnx_builder::create_onnx_cpu_session;
+pub use postprocess::{PostprocessParams, audio_postprocess, recovery_order};
 pub use preprocessor::LangId;
+pub use preprocessor::{TextProcessor, bert, en, phoneme_finalize, text_normalize, zh};
+pub use preprocessor::lang::Lang;
 
 use logits_sampler::Sampler;
-use preprocessor::{TextProcessor, bert::BertModel, en::g2p_en::G2pEn, zh::g2pw::G2PW};
+use preprocessor::{bert::BertModel, en::g2p_en::G2pEn, zh::g2pw::G2PW};
 
 pub use error::GSVError;
 pub use logits_sampler::{SamplingParams, SamplingParamsBuilder};
@@ -40,11 +44,24 @@ use crate::{onnx_builder::BIG_CORES, sv::SvModel};
 
 const T2S_DECODER_EOS: i64 = 1024;
 const VOCAB_SIZE: usize = 1025;
-const NUM_LAYERS: usize = 24;
+const DEFAULT_NUM_LAYERS: usize = 24;
 
 type KvDType = f32;
 
 static STANDALONE_TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn t2s_num_layers_from_session(session: &Session) -> usize {
+    let n = session
+        .inputs
+        .iter()
+        .filter(|input| input.name.starts_with("ik_cache_"))
+        .count();
+    if n == 0 {
+        DEFAULT_NUM_LAYERS
+    } else {
+        n
+    }
+}
 
 fn t2s_kv_io_names(num_layers: usize) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
     let ik = (0..num_layers).map(|i| format!("ik_cache_{}", i)).collect();
@@ -129,8 +146,12 @@ impl TTSModel {
             sample_format: hound::SampleFormat::Float,
         };
 
+        let t2s_s_decoder = create_onnx_cpu_session(t2s_s_decoder_path)?;
+        let num_layers = t2s_num_layers_from_session(&t2s_s_decoder);
+        info!("T2S decoder num_layers: {}", num_layers);
+
         let (t2s_dec_ik, t2s_dec_iv, t2s_k_cache_out, t2s_v_cache_out) =
-            t2s_kv_io_names(NUM_LAYERS);
+            t2s_kv_io_names(num_layers);
 
         Ok(TTSModel {
             text_processor: TextProcessor::new(
@@ -142,7 +163,7 @@ impl TTSModel {
             ssl: create_onnx_cpu_session(ssl_path)?,
             t2s_encoder: create_onnx_cpu_session(t2s_encoder_path)?,
             t2s_fs_decoder: create_onnx_cpu_session(t2s_fs_decoder_path)?,
-            t2s_s_decoder: create_onnx_cpu_session(t2s_s_decoder_path)?,
+            t2s_s_decoder,
             sv: match sv_path {
                 Some(p) => Some(SvModel::new(create_onnx_cpu_session(p)?)),
                 None => None,
@@ -152,7 +173,7 @@ impl TTSModel {
             t2s_dec_iv,
             t2s_k_cache_out,
             t2s_v_cache_out,
-            num_layers: NUM_LAYERS,
+            num_layers,
             output_spec,
         })
     }
@@ -203,12 +224,13 @@ impl TTSModel {
         .unwrap();
 
         let ref_seq = Array2::from_shape_vec((1, ref_seq.len()), ref_seq)?;
-        let (ref_audio_16k, ref_audio_32k) = read_and_resample_audio(&reference_audio_path)?;
+        let (ref_audio_16k, ref_audio_16k_raw, ref_audio_32k) =
+            read_and_resample_audio(&reference_audio_path)?;
         let ssl_content = self.process_ssl(&ref_audio_16k)?;
 
         let sv_emb = match &mut self.sv {
             Some(sv_model) => {
-                let row = ref_audio_16k.row(0);
+                let row = ref_audio_16k_raw.row(0);
                 let audio_slice = row
                     .as_slice()
                     .ok_or_else(|| GSVError::from("reference audio row must be contiguous"))?;
@@ -428,6 +450,7 @@ impl TTSModel {
         text: &str,
         sampling_param: SamplingParams,
         lang_id: LangId,
+        postprocess_params: PostprocessParams,
     ) -> Result<
         (
             WavSpec,
@@ -445,18 +468,29 @@ impl TTSModel {
         let texts_and_seqs = self.text_processor.get_phone_and_bert(&text, lang_id)?;
         debug!("g2pw and preprocess time: {:?}", time.elapsed()?);
         let ref_data = ref_data.clone();
+        let sample_rate = spec.sample_rate;
 
         let stream = stream! {
+            let mut fragments = Vec::new();
             for (text, seq, bert) in texts_and_seqs {
                 debug!("process: {:?}", text);
                 match self.in_stream_once_gen(&text, &bert, &seq, &ref_data, sampling_param).await {
-                    Ok(samples) => {
-                        for sample in samples {
-                            yield Ok(sample);
-                        }
+                    Ok(samples) => fragments.push(samples),
+                    Err(e) => {
+                        yield Err(e);
+                        return;
                     }
-                    Err(e) => yield Err(e),
                 }
+            }
+
+            let final_audio = audio_postprocess(
+                vec![fragments],
+                sample_rate,
+                &postprocess_params,
+                None,
+            );
+            for sample in final_audio {
+                yield Ok(sample);
             }
         };
 
@@ -580,17 +614,10 @@ impl TTSModel {
         debug!("SoVITS all time: {:?}", time.elapsed()?);
         let output_audio = outputs["audio"].try_extract_array::<f32>()?;
         let (mut audio, _) = output_audio.into_owned().into_raw_vec_and_offset();
-        let mut max_audio = 0.0f32;
         for sample in &mut audio {
             *sample *= 4.0;
-            if sample.is_finite() {
-                max_audio = max_audio.max(sample.abs());
-            }
-        }
-        if max_audio > 1.0 {
-            let inv = 1.0 / max_audio;
-            for x in &mut audio {
-                *x *= inv;
+            if !sample.is_finite() {
+                *sample = 0.0;
             }
         }
 
@@ -608,9 +635,12 @@ impl TTSModel {
         text: &str,
         sampling_param: SamplingParams,
         lang_id: LangId,
+        postprocess_params: PostprocessParams,
     ) -> Result<(WavSpec, Vec<f32>), GSVError> {
         Self::run_async_in_context(async {
-            let (spec, stream) = self.synthesize(text, sampling_param, lang_id).await?;
+            let (spec, stream) = self
+                .synthesize(text, sampling_param, lang_id, postprocess_params)
+                .await?;
             let mut samples = Vec::new();
             futures::pin_mut!(stream);
             while let Some(sample) = stream.next().await {
@@ -658,7 +688,7 @@ fn resample_audio(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>
 
 fn read_and_resample_audio<P: AsRef<Path>>(
     path: P,
-) -> Result<(Array2<f32>, Array2<f32>), GSVError> {
+) -> Result<(Array2<f32>, Array2<f32>, Array2<f32>), GSVError> {
     let file = File::open(&path)
         .map_err(|e| GSVError::from(format!("Failed to open reference audio: {}", e)))?;
     let wav_reader = WavReader::new(file)?;
@@ -677,27 +707,33 @@ fn read_and_resample_audio<P: AsRef<Path>>(
         .map(|s| s as f32 / i16::MAX as f32)
         .collect();
 
-    // Ensure audio is not too short
+    // Ensure audio is not too short (0.5s) or too long (10s at 16kHz, matching Python TTS.py)
     if audio_samples.len() < spec.sample_rate as usize / 2 {
         return Err(GSVError::from(
             "Reference audio too short, must be at least 0.5 seconds",
         ));
     }
+    let max_samples_16k = 16000 * 10;
+    let samples_16k_len = audio_samples.len() * 16000 / spec.sample_rate as usize;
+    if samples_16k_len > max_samples_16k {
+        log::warn!(
+            "Reference audio exceeds 10s at 16kHz ({} samples); trimming may improve quality",
+            samples_16k_len
+        );
+    }
 
     // Resample to 16kHz and 32kHz (single PCM buffer, no full clone between passes).
-    let mut ref_audio_16k = resample_audio(&audio_samples, spec.sample_rate, 16000)?;
+    let ref_audio_16k_raw = resample_audio(&audio_samples, spec.sample_rate, 16000)?;
     let ref_audio_32k = resample_audio(&audio_samples, spec.sample_rate, 32000)?;
 
-    // Prepend 0.3 seconds of silence
-    let silence_16k = vec![0.0; (0.3 * 16000.0) as usize]; // 8000 samples for 16kHz
-    // let silence_32k = vec![0.0; (0.3 * 32000.0) as usize]; // 8000 samples for 16kHz
+    // Append 0.3 seconds of silence for SSL (matches Python TTS._set_prompt_semantic).
+    let silence_16k = vec![0.0; (0.3 * 16000.0) as usize];
+    let mut ref_audio_16k_ssl = ref_audio_16k_raw.clone();
+    ref_audio_16k_ssl.extend(silence_16k);
 
-    ref_audio_16k.splice(0..0, silence_16k);
-    // ref_audio_32k.splice(0..0, silence_32k);
-
-    // Convert to Array2
     Ok((
-        Array2::from_shape_vec((1, ref_audio_16k.len()), ref_audio_16k)?,
+        Array2::from_shape_vec((1, ref_audio_16k_ssl.len()), ref_audio_16k_ssl)?,
+        Array2::from_shape_vec((1, ref_audio_16k_raw.len()), ref_audio_16k_raw)?,
         Array2::from_shape_vec((1, ref_audio_32k.len()), ref_audio_32k)?,
     ))
 }
