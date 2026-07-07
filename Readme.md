@@ -28,9 +28,9 @@
 
 ## 项目状态与已知问题
 
-2026-03-21: 优化了中英文混合效果（借助Cursor自动化编写）
+2026-07-08: 重构推理预处理管线，对齐 Python TextPreprocessor/chinese2：tone sandhi、erhua、分段切句、短句补齐、英文 num2en、parity 测试，增强多语言输出效果。更新导出代码,方便自行导出模型。
 
-2026-07-08: 重构推理预处理管线，对齐 Python TextPreprocessor/chinese2：tone sandhi、erhua、分段切句、短句补齐、英文 num2en、parity 测试。
+2026-03-21: 优化了中英文混合效果（借助Cursor自动化编写）
 
 2026-01-25: 测试了ort_rc11,但是在mac（arm）上性能更差（-10%），目前将deps固定在了ort_rc10。参见[update/ort_rc_11](https://github.com/bailu-obj/gpt-sovits-onnx-rs/tree/update/ort_rc_11)分支  
 
@@ -58,7 +58,6 @@
 | 方案 | TTS 效果 | 性能 | 平台兼容性 | 易用性 |
 | :--- | :--- | :--- | :--- | :--- |
 | **[Qwen3TTS](https://github.com/predict-woo/qwen3-tts.cpp)** | ★★★★★ (效果优秀) | ★★☆☆☆ (GGML优化，但是模型本身开销大) | ★★★★☆ (理论支持全平台，但平台性能要求高) | ★★★★☆ (需要转换模型) |
-| **[VoxCPMRS（我的实现）](https://github.com/bailu-obj/voxcpm-rs)** | ★★★★☆ (效果优秀，但是测试不如qwen3) | ★☆☆☆☆ (Candle，性能在mac由于torch，其他平台不一定) | ★★☆☆☆ (全平台CPU，但延迟高) | ★★☆☆☆（暂仅适配mac平台）  |
 
 -----
 
@@ -72,8 +71,6 @@
   * ✅ **推荐使用 `GPT-SoVITS-RS`**
 * **追求高拟真度且需要在 Android 和 x86 CPU 上运行**：
   * ✅ **可以尝试本项目**，并欢迎帮助改进！
-* **追求高拟真度且有强大的GPU**：
-  * ✅ **建议使用Qwen TTS和VoxCPM**
 
 -----
 
