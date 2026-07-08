@@ -1,5 +1,7 @@
 # Perf Record
 
+> **2026-07-09:** PyTorch vs Rust ONNX CPU speed (v2Pro / v2ProPlus) → [`pytorch_vs_onnx_speed.md`](pytorch_vs_onnx_speed.md)
+
 * **Input**: 你好呀，我们是一群追逐梦想的人！
 * **Output WAV Time**: 3s
 

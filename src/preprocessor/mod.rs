@@ -86,6 +86,23 @@ impl TextProcessor {
         Ok(result)
     }
 
+    /// Phonemize a single utterance without `pre_seg_text` (matches Python
+    /// `segment_and_extract_feature_for_text` used for reference prompt text).
+    pub fn get_phone_and_bert_whole(
+        &mut self,
+        text: &str,
+        lang_id: LangId,
+    ) -> Result<(String, Vec<i64>, Array2<f32>)> {
+        let cleaned = normalize_input(text)?;
+        match self.process_chunk(&cleaned, &cleaned.text, lang_id, false)? {
+            Some(output) => Ok((output.norm_text, output.phone_ids, output.bert)),
+            None => Err(anyhow::anyhow!(
+                "No phonemes or BERT features could be generated for the text: {}",
+                text
+            )),
+        }
+    }
+
     fn process_chunk(
         &mut self,
         cleaned: &CleanedInput,

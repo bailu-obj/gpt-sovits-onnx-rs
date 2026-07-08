@@ -257,7 +257,7 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_runInfere
 
     match model.synthesize_sync(
         &text,
-        SamplingParamsBuilder::new().top_k(4).top_p(0.9).temperature(1.0).repetition_penalty(1.35).build(),
+            SamplingParamsBuilder::new().top_k(4).top_p(0.9).temperature(1.0).repetition_penalty(1.35).seed(42).build(),
         lang_id,
         PostprocessParams::default(),
     ) {

@@ -9,3 +9,4 @@ MNN*
 .vscode/
 onnx_build/
 gpt-sovits-upstream/
+scripts/reports/

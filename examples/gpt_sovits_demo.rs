@@ -11,14 +11,29 @@ struct Args {
         default_value = "/home/qiang/projects/GPT-SoVITS/onnx-patched/custom"
     )]
     model_path: PathBuf,
+    /// Optional JSON file to override built-in sampling defaults.
+    #[arg(long)]
+    params: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
     run_count: usize,
-    #[arg(long, default_value = "你好呀，我们是一群追逐梦想的人！")]
+    #[arg(long, default_value = "今天天气真不错。")]
     text: String,
-    #[arg(long, default_value = "zh")] // can be zh/yue
+    #[arg(long, default_value = "zh")]
     lang: String,
     #[arg(long, default_value = "格式化，可以给自家的奶带来大量的。")]
     ref_text: String,
+    #[arg(long)]
+    top_k: Option<usize>,
+    #[arg(long)]
+    top_p: Option<f32>,
+    #[arg(long)]
+    temperature: Option<f32>,
+    #[arg(long)]
+    repetition_penalty: Option<f32>,
+    #[arg(long)]
+    seed: Option<u64>,
+    #[arg(long, default_value = "output.wav")]
+    output: String,
 }
 
 struct TimingStats {
@@ -57,22 +72,69 @@ impl TimingStats {
     }
 }
 
+fn resolve_infer_params(args: &Args) -> Result<InferParams, GSVError> {
+    let mut params = if let Some(path) = &args.params {
+        InferParams::from_file(path)?
+    } else {
+        InferParams::default()
+    };
+
+    if let Some(top_k) = args.top_k {
+        params.top_k = top_k;
+    }
+    if let Some(top_p) = args.top_p {
+        params.top_p = top_p;
+    }
+    if let Some(temperature) = args.temperature {
+        params.temperature = temperature;
+    }
+    if let Some(repetition_penalty) = args.repetition_penalty {
+        params.repetition_penalty = repetition_penalty;
+    }
+    if let Some(seed) = args.seed {
+        params.seed = Some(seed);
+    }
+
+    Ok(params)
+}
+
+fn find_model_prefix(assets_dir: &Path) -> Result<String, GSVError> {
+    if assets_dir.join("custom_vits.onnx").exists() {
+        return Ok("custom".to_string());
+    }
+
+    for entry in std::fs::read_dir(assets_dir).map_err(|e| {
+        GSVError::FileNotFound(format!("Failed to read model directory {:?}: {}", assets_dir, e))
+    })? {
+        let entry = entry.map_err(|e| GSVError::from(e.to_string()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(prefix) = name.strip_suffix("_vits.onnx") {
+            return Ok(prefix.to_string());
+        }
+    }
+
+    Err(GSVError::FileNotFound(format!(
+        "No *_vits.onnx found in {:?}",
+        assets_dir
+    )))
+}
+
 fn create_model(assets_dir: &Path) -> Result<TTSModel, GSVError> {
-    // check the path exists
     if !assets_dir.exists() {
         return Err(GSVError::FileNotFound(format!(
             "Assets directory not found: {:?}", assets_dir
         )));
     }
+    let prefix = find_model_prefix(assets_dir)?;
     TTSModel::new(
-        assets_dir.join("custom_vits.onnx"),
+        assets_dir.join(format!("{prefix}_vits.onnx")),
         assets_dir.join("ssl.onnx"),
-        assets_dir.join("custom_t2s_encoder.onnx"),
-        assets_dir.join("custom_t2s_fs_decoder.onnx"),
-        assets_dir.join("custom_t2s_s_decoder.onnx"),
+        assets_dir.join(format!("{prefix}_t2s_encoder.onnx")),
+        assets_dir.join(format!("{prefix}_t2s_fs_decoder.onnx")),
+        assets_dir.join(format!("{prefix}_t2s_s_decoder.onnx")),
         Some(assets_dir.join("bert.onnx")),
         Some(assets_dir.join("g2pW.onnx")),
-        Some(assets_dir.join("g2p_en")), // assume you have g2p en mode downloaded, can be none
+        Some(assets_dir.join("g2p_en")),
         match assets_dir.join("sv.onnx").exists() {
             true => Some(assets_dir.join("sv.onnx")),
             false => None,
@@ -91,6 +153,7 @@ fn write_wav(spec: WavSpec, samples: &[f32], filename: &str) -> Result<(), GSVEr
 
 fn run_sync_inference(
     model: &mut TTSModel,
+    infer: &InferParams,
     text: &str,
     lang: &str,
     runs: usize,
@@ -101,11 +164,12 @@ fn run_sync_inference(
     if lang == "yue" {
         lang_id = LangId::AutoYue;
     }
+    let sampling = infer.to_sampling_params();
     for i in 0..runs {
         let start = Instant::now();
         let (spec, samples) = model.synthesize_sync(
             text,
-            SamplingParamsBuilder::new().top_k(4).top_p(0.9).temperature(1.0).repetition_penalty(1.35).build(),
+            sampling,
             lang_id,
             PostprocessParams::default(),
         )?;
@@ -120,6 +184,7 @@ fn run_sync_inference(
 fn main() -> Result<(), GSVError> {
     env_logger::init();
     let args = Args::parse();
+    let infer = resolve_infer_params(&args)?;
 
     let mut model = create_model(&args.model_path)?;
     model.process_reference_sync(
@@ -128,10 +193,29 @@ fn main() -> Result<(), GSVError> {
         LangId::Auto,
     )?;
 
-    let lang = args.lang;
+    println!(
+        "text: {:?} ref_text: {:?}",
+        args.text, args.ref_text
+    );
+    println!(
+        "infer params: top_k={} top_p={} temperature={} repetition_penalty={} seed={:?}",
+        infer.top_k,
+        infer.top_p,
+        infer.temperature,
+        infer.repetition_penalty,
+        infer.seed
+    );
 
-    let stats = run_sync_inference(&mut model, &args.text, &lang, args.run_count, "output.wav")?;
+    let stats = run_sync_inference(
+        &mut model,
+        &infer,
+        &args.text,
+        &args.lang,
+        args.run_count,
+        &args.output,
+    )?;
     stats.print("Synchronous", args.run_count);
+    println!("Wrote {}", args.output);
 
     Ok(())
 }

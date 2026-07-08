@@ -22,6 +22,7 @@ use tokio::task::block_in_place;
 
 mod cpu_info;
 mod error;
+mod infer_params;
 mod logits_sampler;
 mod onnx_builder;
 mod postprocess;
@@ -38,6 +39,7 @@ use logits_sampler::Sampler;
 use preprocessor::{bert::BertModel, en::g2p_en::G2pEn, zh::g2pw::G2PW};
 
 pub use error::GSVError;
+pub use infer_params::InferParams;
 pub use logits_sampler::{SamplingParams, SamplingParamsBuilder};
 
 use crate::{onnx_builder::BIG_CORES, sv::SvModel};
@@ -45,6 +47,14 @@ use crate::{onnx_builder::BIG_CORES, sv::SvModel};
 const T2S_DECODER_EOS: i64 = 1024;
 const VOCAB_SIZE: usize = 1025;
 const DEFAULT_NUM_LAYERS: usize = 24;
+/// Product of VITS `upsample_rates` for v2 / v2Pro / v2ProPlus (`[10, 8, 2, 2, 2]`).
+const VITS_UPSAMPLE_RATE: usize = 640;
+
+/// Expected VITS waveform length before postprocess, matching Python
+/// `pred_semantic.shape[0] * 2 * upsample_rate`.
+fn vits_output_samples(semantic_token_count: usize) -> usize {
+    semantic_token_count * 2 * VITS_UPSAMPLE_RATE
+}
 
 type KvDType = f32;
 
@@ -209,21 +219,11 @@ impl TTSModel {
     ) -> Result<(), GSVError> {
         info!("Processing reference audio and text: {}", ref_text);
         let ref_text = ensure_punctuation(ref_text);
-        let phones = self.text_processor.get_phone_and_bert(&ref_text, lang_id)?;
-        let ref_seq: Vec<i64> = phones.iter().fold(Vec::new(), |mut seq, p| {
-            seq.extend(p.1.clone());
-            seq
-        });
-
-        let ref_bert: Vec<Array2<f32>> = phones.iter().map(|f| f.2.clone()).collect();
-        // Concatenate along dimension 0
-        let ref_bert = concatenate(
-            Axis(0),
-            &ref_bert.iter().map(|v| v.view()).collect::<Vec<_>>(),
-        )
-        .unwrap();
-
-        let ref_seq = Array2::from_shape_vec((1, ref_seq.len()), ref_seq)?;
+        let (ref_norm, ref_phone_ids, ref_bert) =
+            self.text_processor
+                .get_phone_and_bert_whole(&ref_text, lang_id)?;
+        let ref_seq = Array2::from_shape_vec((1, ref_phone_ids.len()), ref_phone_ids)?;
+        debug!("Reference norm text: {}", ref_norm);
         let (ref_audio_16k, ref_audio_16k_raw, ref_audio_32k) =
             read_and_resample_audio(&reference_audio_path)?;
         let ssl_content = self.process_ssl(&ref_audio_16k)?;
@@ -284,6 +284,84 @@ impl TTSModel {
         lang_id: LangId,
     ) -> Result<(), GSVError> {
         Self::run_async_in_context(self.process_reference(reference_audio_path, ref_text, lang_id))
+    }
+
+    /// Returns the cached SV embedding after [`Self::process_reference`].
+    pub fn sv_embedding(&self) -> Option<ArrayD<f32>> {
+        self.ref_data
+            .as_ref()
+            .and_then(|data| data.sv_emb.clone())
+    }
+
+    /// Cached reference tensors after [`Self::process_reference`].
+    pub fn reference_data(&self) -> Option<Arc<ReferenceData>> {
+        self.ref_data.clone()
+    }
+
+    /// Phoneme ids and BERT features for synthesis text.
+    pub fn phones_and_bert_for_text(
+        &mut self,
+        text: &str,
+        lang_id: LangId,
+    ) -> Result<Vec<(String, Vec<i64>, Array2<f32>)>, GSVError> {
+        let text = ensure_punctuation(text);
+        Ok(self.text_processor.get_phone_and_bert(&text, lang_id)?)
+    }
+
+    /// Debug snapshot of T2S inputs and first-stage logits (for parity checks).
+    pub fn debug_t2s_snapshot(
+        &mut self,
+        text: &str,
+        lang_id: LangId,
+    ) -> Result<serde_json::Value, GSVError> {
+        let phones = self.phones_and_bert_for_text(text, lang_id)?;
+        let ref_data = self
+            .ref_data
+            .as_ref()
+            .ok_or_else(|| GSVError::from("Reference data not initialized"))?
+            .clone();
+        let text_seq: Vec<i64> = phones.iter().fold(Vec::new(), |mut seq, p| {
+            seq.extend(p.1.clone());
+            seq
+        });
+        let text_bert_parts: Vec<_> = phones.iter().map(|p| p.2.view()).collect();
+        let text_bert = concatenate(Axis(0), &text_bert_parts)?;
+        let text_seq_arr = Array2::from_shape_vec((1, text_seq.len()), text_seq)?;
+        let x = concatenate(Axis(1), &[ref_data.ref_seq.view(), text_seq_arr.view()])?;
+        let bert = concatenate(Axis(1), &[ref_data.ref_bert.t(), text_bert.t()])?;
+        let bert = bert.insert_axis(Axis(0)).to_owned();
+
+        let encoder_output = self.t2s_encoder.run(inputs![
+            "ssl_content" => TensorRef::from_array_view(&ref_data.ssl_content)?
+        ])?;
+        let prompts = encoder_output["prompts"]
+            .try_extract_array::<i64>()?
+            .into_owned();
+
+        let fs_decoder_output = self.t2s_fs_decoder.run(inputs![
+            "x" => TensorRef::from_array_view(&x.as_standard_layout())?,
+            "prompts" => TensorRef::from_array_view(prompts.view())?,
+            "bert" => TensorRef::from_array_view(&bert.as_standard_layout())?,
+        ])?;
+        let logits = fs_decoder_output["logits"]
+            .try_extract_array::<f32>()?
+            .into_owned();
+        let logits_vec = logits.as_slice().unwrap();
+        let masked = &logits_vec[..logits_vec.len().saturating_sub(1)];
+        let argmax = logits_sampler::argmax(masked);
+
+        Ok(serde_json::json!({
+            "ref_seq_len": ref_data.ref_seq.shape()[1],
+            "ref_seq_head": ref_data.ref_seq.slice(s![0, ..8.min(ref_data.ref_seq.shape()[1])]).iter().copied().collect::<Vec<_>>(),
+            "x_len": x.shape()[1],
+            "x_head": x.slice(s![0, ..8.min(x.shape()[1])]).iter().copied().collect::<Vec<_>>(),
+            "bert_shape": bert.shape().to_vec(),
+            "bert_mean": bert.mean().unwrap_or(0.0),
+            "prompts_len": prompts.shape()[1],
+            "prompts_head": prompts.slice(s![0, ..5]).iter().copied().collect::<Vec<_>>(),
+            "ssl_shape": ref_data.ssl_content.shape().to_vec(),
+            "fs_argmax_masked": argmax,
+        }))
     }
 
     /// Efficiently runs the streaming decoder loop with a pre-allocated, resizable KV cache.
@@ -353,11 +431,12 @@ impl TTSModel {
                 }
             }
 
-            y_vec.push(sampler.sample(
+            let sampled = sampler.sample(
                 &mut logits_scratch,
                 &y_vec,
                 &sampling_param,
-            ));
+            );
+            y_vec.push(sampled);
 
             let argmax = logits_sampler::argmax(&logits_scratch);
 
@@ -421,16 +500,13 @@ impl TTSModel {
             // --- 4. Update valid length and check stop condition ---
             valid_len = new_valid_len;
 
-            if idx >= 1500 || argmax == T2S_DECODER_EOS {
-                let mut sliced = y_vec[(y_vec.len() - idx + 1)..(y_vec.len() - 1)]
-                    .iter()
-                    .map(|&i| if i == T2S_DECODER_EOS { 0 } else { i })
-                    .collect::<Vec<i64>>();
-                sliced.push(0);
+            if idx >= 1500 || sampled == T2S_DECODER_EOS || argmax == T2S_DECODER_EOS {
+                let sliced = logits_sampler::extract_semantic_tokens(&y_vec, prefix_len, idx);
                 debug!(
-                    "t2s final len: {}, prefix_len: {}",
+                    "t2s final len: {}, prefix_len: {}, stop_idx: {}",
                     sliced.len(),
-                    prefix_len
+                    prefix_len,
+                    idx
                 );
                 let y = ArrayD::from_shape_vec(IxDyn(&[1, 1, sliced.len()]), sliced)?;
                 return Ok(y);
@@ -508,7 +584,10 @@ impl TTSModel {
         let text_seq: ArrayView2<'_, i64> =
             ArrayView2::from_shape((1, text_seq_vec.len()), text_seq_vec)
                 .map_err(|_| GSVError::from("invalid text sequence layout"))?;
-        let mut sampler = Sampler::new(VOCAB_SIZE);
+        let mut sampler = match sampling_param.seed {
+            Some(seed) => Sampler::with_seed(seed),
+            None => Sampler::new(VOCAB_SIZE),
+        };
 
         let prompts = {
             let time = SystemTime::now();
@@ -577,9 +656,12 @@ impl TTSModel {
                 k_caches.push(k_large);
                 v_caches.push(v_large);
             }
-            let (mut logits_vec, _) = logits.into_raw_vec_and_offset();
-            logits_vec.pop(); // remove T2S_DECODER_EOS
-            let sampling_rst = sampler.sample(&mut logits_vec, &y_vec, &sampling_param);
+            let (logits, _) = logits.into_raw_vec_and_offset();
+            let mut logits_scratch = Vec::with_capacity(logits.len());
+            // First fs_decoder sample matches s_decoder idx=0 (mask EOS logit).
+            let keep = logits.len().saturating_sub(1);
+            logits_scratch.extend_from_slice(&logits[..keep]);
+            let sampling_rst = sampler.sample(&mut logits_scratch, &y_vec, &sampling_param);
             y_vec.push(sampling_rst);
             (y_vec, k_caches, v_caches, initial_seq_len)
         };
@@ -612,10 +694,28 @@ impl TTSModel {
             ])?,
         };
         debug!("SoVITS all time: {:?}", time.elapsed()?);
+        let semantic_len = pred_semantic.shape()[2];
+        let expected_samples = vits_output_samples(semantic_len);
+        if let Some(slice) = pred_semantic.as_slice() {
+            let preview: Vec<_> = slice.iter().take(8).copied().collect();
+            debug!(
+                "pred_semantic len={}, head={:?}",
+                semantic_len,
+                preview
+            );
+        }
         let output_audio = outputs["audio"].try_extract_array::<f32>()?;
         let (mut audio, _) = output_audio.into_owned().into_raw_vec_and_offset();
+        // ONNX VITS returns dynamic-length audio after export fix; only trim excess padding.
+        if audio.len() > expected_samples {
+            audio.truncate(expected_samples);
+        }
+        debug!(
+            "SoVITS output cropped to {} samples (semantic_len={})",
+            audio.len(),
+            semantic_len
+        );
         for sample in &mut audio {
-            *sample *= 4.0;
             if !sample.is_finite() {
                 *sample = 0.0;
             }
@@ -700,12 +800,24 @@ fn read_and_resample_audio<P: AsRef<Path>>(
         return Err(GSVError::from("Reference audio must be mono 16-bit PCM"));
     }
 
-    let audio_samples: Vec<f32> = wav_reader
+    let mut audio_samples: Vec<f32> = wav_reader
         .into_samples::<i16>()
         .collect::<Result<Vec<i16>, _>>()?
         .into_iter()
         .map(|s| s as f32 / i16::MAX as f32)
         .collect();
+
+    if let Some(&max_abs) = audio_samples
+        .iter()
+        .max_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        if max_abs > 1.0 {
+            let scale = max_abs.min(2.0);
+            for sample in &mut audio_samples {
+                *sample /= scale;
+            }
+        }
+    }
 
     // Ensure audio is not too short (0.5s) or too long (10s at 16kHz, matching Python TTS.py)
     if audio_samples.len() < spec.sample_rate as usize / 2 {
@@ -726,8 +838,9 @@ fn read_and_resample_audio<P: AsRef<Path>>(
     let ref_audio_16k_raw = resample_audio(&audio_samples, spec.sample_rate, 16000)?;
     let ref_audio_32k = resample_audio(&audio_samples, spec.sample_rate, 32000)?;
 
-    // Append 0.3 seconds of silence for SSL (matches Python TTS._set_prompt_semantic).
-    let silence_16k = vec![0.0; (0.3 * 16000.0) as usize];
+    // Append trailing silence for SSL (matches Python TTS._set_prompt_semantic:
+    // `np.zeros(int(configs.sampling_rate * 0.3))` appended to 16 kHz HuBERT input).
+    let silence_16k = vec![0.0; (32000_f32 * 0.3) as usize];
     let mut ref_audio_16k_ssl = ref_audio_16k_raw.clone();
     ref_audio_16k_ssl.extend(silence_16k);
 

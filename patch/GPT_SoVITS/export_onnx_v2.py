@@ -253,7 +253,7 @@ class VitsModel(nn.Module):
             self.hps.data.win_length,
             center=False
         )
-        return self.vq_model(pred_semantic, text_seq, refer, sv_emb=sv_emb)[0, 0]
+        return self.vq_model(pred_semantic, text_seq, refer, sv_emb=sv_emb)[0]
 
 class GptSoVits(nn.Module):
     def __init__(self, vits, t2s, sv_model=None, version="v2"):

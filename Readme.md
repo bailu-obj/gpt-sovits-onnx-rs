@@ -21,12 +21,14 @@
 * **完整的 Android 构建支持**：提供了 `build_for_android.sh` 脚本，自动化处理 ONNX Runtime 的源码下载、编译及项目构建，解决了官方 `ort-rs` 缺少 Android 预构建包的问题。
 
 
-* 详细性能数据请参考 [**性能记录 (perf\_record)**](doc/perf_record.md)。
+* 详细性能数据请参考 [**性能记录 (perf\_record)**](doc/perf_record.md) 与 [**PyTorch vs ONNX 速度对比**](doc/pytorch_vs_onnx_speed.md)（2026-07-09，v2Pro / v2ProPlus CPU）。
 * 通过在运行时设置lang_id为LangId::AutoYue，可以启用粤语模式。
 
 -----
 
 ## 项目状态与已知问题
+
+2026-07-09: 对齐 Python 参考文本 phoneme 路径（`get_phone_and_bert_whole`）、HuBERT SSL 尾静音 padding（`32000×0.3`）、T2S 采样（`temperature=0` 时仍应用 rep-penalty/top-k/top-p）。内置采样默认值（`InferParams::default()`）；`scripts/compare_onnx_versions.py`（v2Pro / v2ProPlus）。波形与 PyTorch 在相同 `seed` 下仍可能因 RNG / VITS 随机 decode 略有差异，见 `scripts/reports/` 对比报告。
 
 2026-07-08: 重构推理预处理管线，对齐 Python TextPreprocessor/chinese2：tone sandhi、erhua、分段切句、短句补齐、英文 num2en、parity 测试，增强多语言输出效果。更新导出代码,方便自行导出模型。
 
@@ -100,13 +102,30 @@ curl -fL -o "${MODEL_DIR}/ref.wav" \
   https://huggingface.co/mikv39/gpt-sovits-onnx-custom/resolve/main/ref.wav
 ```
 
-运行 demo 时指定对应 `--ref-text`：
+运行 demo 时通过 CLI 指定参考文本与合成文本；采样参数使用程序内置默认值：
+
+```bash
+cargo run --release --example gpt_sovits_demo -- \
+  --model-path "${MODEL_DIR}" \
+  --text "今天天气真不错。" \
+  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --output output.wav
+```
+
+或使用 CLI 逐项指定：
 
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
   --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "今天天气真不错。"
+  --text "今天天气真不错。" \
+  --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35 --seed 42
+```
+
+与 PyTorch 对比（报告在 `scripts/reports/`，不在仓库根目录）：
+
+```bash
+gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 ```
 
 参考音频建议 **3–10 秒**；过长可能导致上游训练/推理报错。
@@ -139,6 +158,11 @@ cargo run --release --example gpt_sovits_demo -- \
 ./scripts/export/03_setup_env.sh --source HF
 ./scripts/export/04_download_models.sh --version v2Pro
 ./scripts/export/05_export.sh --version v2Pro --export-name custom --no-quant
+
+# v2ProPlus（与 v2Pro 共用 SV 分支，仅 SoVITS 权重不同）
+./scripts/export/04_download_models.sh --version v2ProPlus
+./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --no-quant
+./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/custom_v2proplus --expect-v2pro
 ```
 
 详见 [scripts/README.md — macOS 分阶段导出](scripts/README.md#macos-分阶段导出)。
@@ -151,14 +175,17 @@ cargo run --release --example gpt_sovits_demo -- \
 cargo build --release
 ```
 
-使用如下命令可以运行命令行demo，该demo会自动根据模型路径下转换的模型文件，启用v2或v2Pro模型。需先将 [ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav) 下载到模型目录，见上文「参考音频」一节。
+使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `*_vits.onnx` 自动选择 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先将 [ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav) 下载到模型目录，见上文「参考音频」一节。
 
 ```bash
-RUST_LOG=Debug cargo run --release --example gpt_sovits_demo -- \
-  --model-path /path/to/onnx-patched/custom \
+RUST_LOG=debug cargo run --release --example gpt_sovits_demo -- \
+  --model-path /path/to/onnx-patched/custom_v2proplus \
+  --text "今天天气真不错。" \
   --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "你好啊，我最喜欢你了"
+  --output output.wav
 ```
+
+Demo 支持 `--text`、`--ref-text`、`--top-k`、`--top-p`、`--temperature`、`--repetition-penalty`、`--seed`、`--output` 等参数；可选 `--params` 覆盖内置采样默认值。
 
 ### 3\. Android 平台构建
 

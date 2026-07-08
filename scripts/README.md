@@ -10,6 +10,12 @@
 | [`scripts/export/`](export/) | macOS 分阶段导出脚本（按顺序逐步执行） |
 | [`scripts/optimize_aio.py`](optimize_aio.py) | ONNX 后期优化（量化、simplify） |
 | [`scripts/requirements.txt`](requirements.txt) | `optimize_aio.py` 的 Python 依赖 |
+| [`scripts/run_python_baseline.py`](run_python_baseline.py) | PyTorch 基线推理（v2 / v2Pro / v2ProPlus） |
+| [`scripts/compare_infer_metrics.py`](compare_infer_metrics.py) | Rust vs Python 时长/RMS/SV/波形相似度（v2ProPlus） |
+| [`scripts/compare_onnx_versions.py`](compare_onnx_versions.py) | Rust vs Python 对比 **v2Pro + v2ProPlus**（T2S 输入 + 波形） |
+| [`scripts/sampling_defaults.py`](sampling_defaults.py) | 内置采样默认值（与 Rust `InferParams::default()` 一致） |
+| [`scripts/reports/`](reports/) | 对比脚本输出的 JSON 报告（已 gitignore，勿放仓库根目录） |
+| [`scripts/sv_fbank_parity.py`](sv_fbank_parity.py) | Python Kaldi fbank → SV ONNX 统计 |
 
 ## 重要：必须覆盖上游 ONNX 模块
 
@@ -27,7 +33,7 @@
 | 4 | [`04_download_models.sh`](export/04_download_models.sh) | 下载权重并 staging `gpt.ckpt` / `sovits.pth`；含 G2PW、g2p_en |
 | 5 | [`05_export.sh`](export/05_export.sh) | `export_onnx_v2.py` + `optimize_aio.py` |
 
-### 示例（V2Pro）
+### 示例（V2Pro / V2ProPlus）
 
 ```bash
 # 1. 克隆上游（只需一次，或更新时重跑）
@@ -44,6 +50,11 @@
 
 # 5. 导出 ONNX（--version 与 --export-name 必填）
 ./scripts/export/05_export.sh --version v2Pro --export-name custom --no-quant
+
+# V2ProPlus
+./scripts/export/04_download_models.sh --version v2ProPlus
+./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --no-quant
+./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/custom_v2proplus --expect-v2pro
 ```
 
 输出目录：`gpt-sovits-upstream/onnx-patched/{export_name}/`
@@ -108,6 +119,24 @@ python scripts/optimize_aio.py --input-dir onnx/custom --output-dir onnx-patched
 | `{name}.json` | 元数据（含 `NumLayers`、`IsV2Pro`） | 同上 |
 | `g2pW.onnx` | ✓ | ✓ |
 | `g2p_en/` | ✓ | ✓ |
+| `ref.wav` | 推荐 | 推荐 |
+
+## 推理参数（内置默认值）
+
+采样参数内置在程序中，**无需** JSON 配置文件：
+
+| 参数 | 默认值 |
+|------|--------|
+| `top_k` | 4 |
+| `top_p` | 0.9 |
+| `temperature` | 1.0 |
+| `repetition_penalty` | 1.35 |
+| `seed` | 42 |
+
+- Rust：`InferParams::default()`；demo 可用 `--top-k` 等 CLI 覆盖
+- Python：[`scripts/sampling_defaults.py`](sampling_defaults.py)；`run_python_baseline.py` 内置相同默认值
+- 可选：通过 `--params path/to.json` 覆盖部分采样字段（仅当你需要非默认配置时）
+- 文本：`--text` / `--ref-text` 始终由 CLI 传入（有内置默认值）
 
 ## Rust 推理验证
 
@@ -122,11 +151,55 @@ curl -fL -o "${MODEL_DIR}/ref.wav" \
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
+  --text "今天天气真不错。" \
   --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "今天天气真不错。"
+  --output output.wav
 ```
 
-V2Pro 目录需包含 `sv.onnx`；demo 会自动检测。`05_export.sh --smoke-test` 也需要模型目录下已有 `ref.wav`。
+可用 CLI 覆盖采样参数：
+
+```bash
+cargo run --release --example gpt_sovits_demo -- \
+  --model-path "${MODEL_DIR}" \
+  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --text "今天天气真不错。" \
+  --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35 --seed 42
+```
+
+V2Pro / V2ProPlus 目录需包含 `sv.onnx`；demo 会自动检测。`05_export.sh --smoke-test` 也需要模型目录下已有 `ref.wav`。
+
+### Rust vs Python 对比
+
+报告写入 **`scripts/reports/`**（不在仓库根目录）：
+
+```bash
+# v2Pro + v2ProPlus 一键对比（T2S 输入、时长、波形 corr）
+gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
+
+# 仅 v2ProPlus + SV 嵌入对比
+gpt-sovits-upstream/.venv/bin/python scripts/compare_infer_metrics.py \
+  --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus
+```
+
+输出示例：
+
+| 脚本 | 报告路径 | WAV 输出 |
+|------|----------|----------|
+| `compare_onnx_versions.py` | `scripts/reports/compare_onnx_versions.json` | `output_v2pro.wav`, `output_v2proplus.wav`, `python_v2pro.wav`, `python_v2proplus.wav` |
+| `compare_infer_metrics.py` | `scripts/reports/compare_infer_metrics.json` | `output.wav`, `python_v2proplus.wav` |
+
+速度与 PyTorch 对比（CPU、v2Pro / v2ProPlus）：[`doc/pytorch_vs_onnx_speed.md`](../doc/pytorch_vs_onnx_speed.md)
+
+调试 T2S 输入（phones / prompts / fs_decoder argmax）：
+
+```bash
+cargo run --release --example dump_rust_t2s -- \
+  --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
+  --text "今天天气真不错。" \
+  --ref-text "格式化，可以给自家的奶带来大量的。"
+```
+
+导出后可用 [`validate_bundle.sh`](export/validate_bundle.sh) 检查产物是否完整；`v2ProPlus` 端到端验证记录见 [`doc/v2proplus_validation.md`](../doc/v2proplus_validation.md)。
 
 ## 预处理一致性测试
 

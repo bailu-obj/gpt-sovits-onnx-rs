@@ -204,13 +204,13 @@ class TextEncoder(nn.Module):
 
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, y, text, ge, speed=1):
-        y_mask = torch.ones_like(y[:1, :1, :])
+    def forward(self, y, y_lengths, text, text_lengths, ge, speed=1):
+        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
 
         y = self.ssl_proj(y * y_mask) * y_mask
         y = self.encoder_ssl(y * y_mask, y_mask)
 
-        text_mask = torch.ones_like(text).to(y.dtype).unsqueeze(0)
+        text_mask = torch.unsqueeze(commons.sequence_mask(text_lengths, text.size(1)), 1).to(y.dtype)
 
         text = self.text_embedding(text).transpose(1, 2)
         text = self.encoder_text(text * text_mask, text_mask)
@@ -218,7 +218,7 @@ class TextEncoder(nn.Module):
 
         y = self.encoder2(y * y_mask, y_mask)
         if speed != 1:
-            y = F.interpolate(y, size=int(y.shape[-1] / speed) + 1, mode="linear")
+            y = F.interpolate(y, scale_factor=1.0 / speed, mode="linear")
             y_mask = F.interpolate(y_mask, size=y.shape[-1], mode="nearest")
 
         stats = self.proj(y) * y_mask
@@ -890,20 +890,27 @@ class SynthesizerTrn(nn.Module):
 
         quantized = self.quantizer.decode(codes)
         if self.semantic_frame_rate == "25hz":
-            quantized = F.interpolate(quantized, size=int(quantized.shape[-1] * 2), mode="nearest")
+            quantized = F.interpolate(quantized, scale_factor=2.0, mode="nearest")
+
+        y_lengths = torch.LongTensor([quantized.size(2)]).to(codes.device)
+        text_lengths = torch.LongTensor([text.size(1)]).to(codes.device)
 
         if self.is_v2pro:
             ge_ = self.ge_to512(ge.transpose(2, 1)).transpose(2, 1)
-            x, m_p, logs_p, y_mask = self.enc_p(quantized, text, ge_, speed)
+            x, m_p, logs_p, y_mask = self.enc_p(
+                quantized, y_lengths, text, text_lengths, ge_, speed
+            )
         else:
-            x, m_p, logs_p, y_mask = self.enc_p(quantized, text, ge, speed)
+            x, m_p, logs_p, y_mask = self.enc_p(
+                quantized, y_lengths, text, text_lengths, ge, speed
+            )
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
 
         z = self.flow(z_p, y_mask, g=ge, reverse=True)
 
         o = self.dec((z * y_mask)[:, :, :], g=ge)
-        return o
+        return o[:, 0, :]
 
     def extract_latent(self, x):
         ssl = self.ssl_proj(x)
