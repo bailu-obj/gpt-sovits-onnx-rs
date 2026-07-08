@@ -7,8 +7,7 @@ pub const SPLITS: &[char] = &[
     '，', '。', '？', '！', ',', '.', '?', '!', '~', ':', '：', '—', '…',
 ];
 
-static PURE_SYMBOL_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\W+$").unwrap());
+static PURE_SYMBOL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\W+$").unwrap());
 
 fn is_split(c: char) -> bool {
     SPLITS.contains(&c)
@@ -77,7 +76,10 @@ pub fn merge_short_text_in_array(texts: &[String], threshold: usize) -> Vec<Stri
 }
 
 fn get_first_segment(text: &str) -> String {
-    let pattern: String = SPLITS.iter().map(|c| regex::escape(&c.to_string())).collect();
+    let pattern: String = SPLITS
+        .iter()
+        .map(|c| regex::escape(&c.to_string()))
+        .collect();
     let re = Regex::new(&format!("[{pattern}]")).unwrap();
     re.split(text).next().unwrap_or("").trim().to_string()
 }
@@ -92,6 +94,55 @@ fn filter_text(texts: &[String]) -> Vec<String> {
 
 fn is_pure_symbols(text: &str) -> bool {
     PURE_SYMBOL_RE.is_match(text)
+}
+
+fn has_content(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_alphanumeric() || matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF))
+}
+
+fn is_decimal_point(chars: &[char], idx: usize) -> bool {
+    chars[idx] == '.'
+        && idx > 0
+        && idx + 1 < chars.len()
+        && chars[idx - 1].is_ascii_digit()
+        && chars[idx + 1].is_ascii_digit()
+}
+
+/// Split on sentence-ending punctuation without treating decimal points or
+/// short-text prefix punctuation as standalone sentences.
+pub fn split_sentence_chunks(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut current = String::new();
+
+    for (idx, &c) in chars.iter().enumerate() {
+        current.push(c);
+        if !matches!(c, '。' | '！' | '？' | '.' | '!' | '?') || is_decimal_point(&chars, idx) {
+            continue;
+        }
+        if !has_content(&current) {
+            continue;
+        }
+
+        let trimmed = current.trim();
+        if !trimmed.is_empty() && !is_pure_symbols(trimmed) {
+            out.push(trimmed.to_string());
+        }
+        current.clear();
+    }
+
+    let tail = current.trim();
+    if !tail.is_empty() && !is_pure_symbols(tail) {
+        out.push(tail.to_string());
+    }
+    if out.is_empty() {
+        let whole = line.trim();
+        if !whole.is_empty() && !is_pure_symbols(whole) {
+            out.push(whole.to_string());
+        }
+    }
+    out
 }
 
 /// Python `TextPreprocessor.pre_seg_text` (default cut0-style: newline split + merge)
@@ -120,21 +171,23 @@ pub fn pre_seg_text(text: &str, lang_en: bool) -> Vec<String> {
     let lines = merge_short_text_in_array(&lines, 5);
 
     let mut texts = Vec::new();
-    for mut line in lines {
+    for line in lines {
         if line.trim().is_empty() || is_pure_symbols(&line) {
             continue;
         }
-        if !line.chars().last().map_or(false, is_split) {
-            if lang_en {
-                line.push('.');
-            } else {
-                line.push('。');
+        for mut chunk in split_sentence_chunks(&line) {
+            if !chunk.chars().last().map_or(false, is_split) {
+                if lang_en {
+                    chunk.push('.');
+                } else {
+                    chunk.push('。');
+                }
             }
-        }
-        if line.chars().count() > 510 {
-            texts.extend(split_big_text(&line, 510));
-        } else {
-            texts.push(line);
+            if chunk.chars().count() > 510 {
+                texts.extend(split_big_text(&chunk, 510));
+            } else {
+                texts.push(chunk);
+            }
         }
     }
     texts
@@ -146,6 +199,36 @@ mod tests {
 
     #[test]
     fn test_collapse_punctuation() {
-        assert_eq!(replace_consecutive_punctuation("你好，，世界"), "你好，世界");
+        assert_eq!(
+            replace_consecutive_punctuation("你好，，世界"),
+            "你好，世界"
+        );
+    }
+
+    #[test]
+    fn test_split_sentence_chunks_ignores_decimal() {
+        assert_eq!(
+            split_sentence_chunks("价格是99.5元。"),
+            vec!["价格是99.5元。"]
+        );
+    }
+
+    #[test]
+    fn test_pre_seg_keeps_short_prefix_with_text() {
+        assert_eq!(pre_seg_text("嗯", false), vec!["。嗯。"]);
+    }
+
+    #[test]
+    fn test_pre_seg_splits_mixed_tail() {
+        let chunks = pre_seg_text(
+            "你好啊,这是一个测试.吃葡萄不吐葡萄皮,不吃葡萄倒吐葡萄皮.This demo is only for test  usage. If you find any 问题, 请修复它.",
+            false,
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.contains("This demo is only for test"))
+        );
+        assert!(chunks.iter().any(|c| c.contains("If you find any 问题")));
     }
 }

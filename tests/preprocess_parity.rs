@@ -5,11 +5,11 @@
 //!   PYTHON_PREPROCESS_JSON=/tmp/python_preprocess.json cargo test preprocess_parity
 
 use gpt_sovits_onnx_rs::{
+    LangId, TextProcessor,
     bert::BertModel,
     en::g2p_en::G2pEn,
     text_normalize::text_normalize,
     zh::{g2pw::G2PW, mandarin_g2p},
-    LangId, TextProcessor,
 };
 use jieba_rs::Jieba;
 use serde::Deserialize;
@@ -41,7 +41,12 @@ fn preprocess_corpus_runs_without_panic() {
             LangId::Auto
         };
         let result = tp.get_phone_and_bert(&item.text, lang);
-        assert!(result.is_ok(), "failed on '{}': {:?}", item.text, result.err());
+        assert!(
+            result.is_ok(),
+            "failed on '{}': {:?}",
+            item.text,
+            result.err()
+        );
     }
 }
 
@@ -86,7 +91,10 @@ fn preprocess_year_as_chinese() {
         .expect("year input should succeed");
     assert_eq!(result.len(), 1);
     let (_text, phone_ids, _) = &result[0];
-    assert!(!phone_ids.is_empty(), "2024年 should produce Chinese phonemes");
+    assert!(
+        !phone_ids.is_empty(),
+        "2024年 should produce Chinese phonemes"
+    );
 }
 
 #[test]
@@ -146,7 +154,8 @@ fn preprocess_possessive_en_g2p() {
 #[ignore = "requires PYTHON_PREPROCESS_JSON from scripts/preprocess_parity.py"]
 fn preprocess_parity_zh_subset() {
     let path = env::var("PYTHON_PREPROCESS_JSON").expect("set PYTHON_PREPROCESS_JSON");
-    let python: Vec<PythonResult> = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let python: Vec<PythonResult> =
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     let mut tp = make_processor();
     let mut matched = 0usize;
     let mut total = 0usize;
@@ -161,7 +170,10 @@ fn preprocess_parity_zh_subset() {
         let rust = tp
             .get_phone_and_bert(&py.text, LangId::Auto)
             .unwrap_or_else(|e| panic!("rust failed on '{}': {}", py.text, e));
-        let rust_ids: Vec<i64> = rust.iter().flat_map(|(_, ids, _)| ids.iter().copied()).collect();
+        let rust_ids: Vec<i64> = rust
+            .iter()
+            .flat_map(|(_, ids, _)| ids.iter().copied())
+            .collect();
         let py_ids = py.phone_ids.clone().unwrap_or_default();
         if rust_ids == py_ids {
             matched += 1;
@@ -171,14 +183,19 @@ fn preprocess_parity_zh_subset() {
         return;
     }
     let ratio = matched as f64 / total as f64;
-    assert!(ratio >= 0.95, "zh-only parity {:.1}% below 95%", ratio * 100.0);
+    assert!(
+        ratio >= 0.95,
+        "zh-only parity {:.1}% below 95%",
+        ratio * 100.0
+    );
 }
 
 #[test]
 #[ignore = "requires PYTHON_PREPROCESS_JSON from scripts/preprocess_parity.py"]
 fn preprocess_parity_vs_python() {
     let path = env::var("PYTHON_PREPROCESS_JSON").expect("set PYTHON_PREPROCESS_JSON");
-    let python: Vec<PythonResult> = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let python: Vec<PythonResult> =
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     let mut tp = make_processor();
     let mut matched = 0usize;
     let mut total = 0usize;
@@ -190,7 +207,10 @@ fn preprocess_parity_vs_python() {
         let rust = tp
             .get_phone_and_bert(&py.text, LangId::Auto)
             .unwrap_or_else(|e| panic!("rust failed on '{}': {}", py.text, e));
-        let rust_ids: Vec<i64> = rust.iter().flat_map(|(_, ids, _)| ids.iter().copied()).collect();
+        let rust_ids: Vec<i64> = rust
+            .iter()
+            .flat_map(|(_, ids, _)| ids.iter().copied())
+            .collect();
         let py_ids = py.phone_ids.clone().unwrap_or_default();
         if rust_ids == py_ids {
             matched += 1;
@@ -253,7 +273,11 @@ fn preprocess_golden_sp3_silence() {
 
 #[test]
 fn preprocess_golden_year() {
-    assert_golden("2024年", 1, &[33, 153, 224, 202, 33, 153, 250, 164, 227, 177, 3]);
+    assert_golden(
+        "2024年",
+        1,
+        &[33, 153, 224, 202, 33, 153, 250, 164, 227, 177, 3],
+    );
 }
 
 #[test]
@@ -262,8 +286,8 @@ fn preprocess_golden_decimal_yuan() {
         "价格是99.5元",
         1,
         &[
-            221, 174, 156, 131, 251, 214, 224, 202, 127, 178, 221, 217, 221, 218, 316, 257,
-            318, 302, 3,
+            221, 174, 156, 131, 251, 214, 224, 202, 127, 178, 221, 217, 221, 218, 316, 257, 318,
+            302, 3,
         ],
     );
 }

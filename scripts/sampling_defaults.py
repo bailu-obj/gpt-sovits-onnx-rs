@@ -5,5 +5,7 @@ DEFAULT_SAMPLING = {
     "top_p": 0.9,
     "temperature": 1.0,
     "repetition_penalty": 1.35,
-    "seed": 42,
 }
+
+# Fixed seed for Rust/Python parity scripts only.
+COMPARE_SEED = 42

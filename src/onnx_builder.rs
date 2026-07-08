@@ -27,7 +27,6 @@ pub fn create_onnx_cpu_session<P: AsRef<Path>>(path: P) -> Result<Session, GSVEr
         .commit_from_file(path)?)
 }
 
-
 // pub fn create_onnx_xnnpack_cpu_session<P: AsRef<Path>>(path: P) -> Result<Session, GSVError> {
 //     Ok(Session::builder()?
 //         .with_execution_providers([XNNPACKExecutionProvider::default().with_intra_op_num_threads(NonZero::new(BIG_CORES.len()).unwrap())

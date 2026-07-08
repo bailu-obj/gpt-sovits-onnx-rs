@@ -1,9 +1,6 @@
 // SP2/SP3 silence token injection after special-symbol commas.
 
-use crate::preprocessor::{
-    clean::SilenceTag,
-    phone_symbol::get_phone_symbol,
-};
+use crate::preprocessor::{clean::SilenceTag, phone_symbol::get_phone_symbol};
 
 /// Insert SP2/SP3 after comma phonemes that replaced ￥ or ^ during cleaning.
 pub fn inject_silence_tokens(phone_ids: &mut Vec<i64>, tags: &[SilenceTag]) {

@@ -3,11 +3,7 @@
 use anyhow::Result;
 use ndarray::Array2;
 
-use crate::preprocessor::{
-    bert::BertModel,
-    clean::SilenceTag,
-    g2p::SpanResult,
-};
+use crate::preprocessor::{bert::BertModel, clean::SilenceTag, g2p::SpanResult};
 
 pub mod english;
 pub mod merge;
@@ -18,7 +14,7 @@ pub mod validate;
 
 pub use english::{filter_english_phonemes, finalize_span_en};
 pub use merge::merge_span_results;
-pub use retry::{needs_short_retry, MIN_PHONES};
+pub use retry::{MIN_PHONES, needs_short_retry};
 pub use symbols::{pad_short_english_phones, phone_to_id, phones_to_ids};
 pub use validate::validate_word2ph;
 

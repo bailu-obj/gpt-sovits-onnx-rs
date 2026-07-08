@@ -1,20 +1,12 @@
 // text/en/g2p_en.rs
-use std::{
-    collections::HashMap,
-    path::{Path},
-    str::FromStr,
-};
+use std::{collections::HashMap, path::Path, str::FromStr};
 
 use anyhow::{Ok, Result};
 use arpabet::Arpabet;
 use log::debug;
 use ndarray::{Array, s};
 use once_cell::sync::Lazy;
-use ort::{
-    inputs,
-    session::Session,
-    value::Tensor,
-};
+use ort::{inputs, session::Session, value::Tensor};
 use regex::Regex;
 use tokenizers::Tokenizer;
 
@@ -34,17 +26,13 @@ static EOS_TOKEN: &str = "</s>";
 static BOS_TOKEN_ID: u32 = 0;
 static EOS_TOKEN_ID: u32 = 2;
 
-static TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[a-zA-Z]+(?:'[a-zA-Z]+)?|\d+(?:\.\d+)?|[^\s\w]").unwrap()
-});
+static TOKEN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[a-zA-Z]+(?:'[a-zA-Z]+)?|\d+(?:\.\d+)?|[^\s\w]").unwrap());
 
 static HOMOGRAPHS: Lazy<HashMap<&'static str, Vec<&'static str>>> = Lazy::new(|| {
     let mut m = HashMap::new();
     m.insert("read", vec!["R", "IY1", "D"]);
-    m.insert(
-        "complex",
-        vec!["K", "AH0", "M", "P", "L", "EH1", "K", "S"],
-    );
+    m.insert("complex", vec!["K", "AH0", "M", "P", "L", "EH1", "K", "S"]);
     m
 });
 

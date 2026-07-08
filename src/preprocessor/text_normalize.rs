@@ -12,12 +12,8 @@ pub fn text_normalize(text: &str) -> String {
     let temp = PUNCTUATION_PERIODS_REGEX
         .replace_all(&temp, ".")
         .into_owned();
-    let temp = COLLAPSE_COMMAS_REGEX
-        .replace_all(&temp, ",")
-        .into_owned();
-    let temp = COLLAPSE_PERIODS_REGEX
-        .replace_all(&temp, ".")
-        .into_owned();
+    let temp = COLLAPSE_COMMAS_REGEX.replace_all(&temp, ",").into_owned();
+    let temp = COLLAPSE_PERIODS_REGEX.replace_all(&temp, ".").into_owned();
     replace_consecutive_punctuation(&temp)
 }
 
@@ -27,10 +23,7 @@ pub fn replace_punctuation_zh(text: &str) -> String {
     for (from, to) in REP_MAP_ZH {
         result = result.replace(from, to);
     }
-    let keep = format!(
-        r"[^\u{{4e00}}-\u{{9fa5}}{}\s]+",
-        regex::escape("!?,….-")
-    );
+    let keep = format!(r"[^\u{{4e00}}-\u{{9fa5}}{}\s]+", regex::escape("!?,….-"));
     let re = Regex::new(&keep).unwrap();
     re.replace_all(&result, "").into_owned()
 }
@@ -143,14 +136,12 @@ fn frac_digits_to_zh(num: &str) -> String {
     digits_to_zh_year(num)
 }
 
-static RE_ZH_PERCENT: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\d+(?:\.\d+)?)%").unwrap());
+static RE_ZH_PERCENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+(?:\.\d+)?)%").unwrap());
 static RE_ZH_YEAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+)年").unwrap());
 static RE_ZH_YUAN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+)元").unwrap());
 static RE_ZH_MONTH: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+)月").unwrap());
 static RE_ZH_DAY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+)日").unwrap());
-static RE_ZH_DECIMAL_YUAN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\d+)\.(\d+)元").unwrap());
+static RE_ZH_DECIMAL_YUAN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d+)\.(\d+)元").unwrap());
 
 const REP_MAP_ZH: &[(&str, &str)] = &[
     ("：", ","),
@@ -179,10 +170,7 @@ static CLEANUP_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 static PUNCTUATION_PERIODS_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"[\u{2026}\u{003F}\u{0021}\u{002E}\u{FF01}\u{FF1F}\u{3002}\u{FF0E}]+",
-    )
-    .unwrap()
+    Regex::new(r"[\u{2026}\u{003F}\u{0021}\u{002E}\u{FF01}\u{FF1F}\u{3002}\u{FF0E}]+").unwrap()
 });
 
 static PUNCTUATION_COMMAS_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -195,3 +183,13 @@ static PUNCTUATION_COMMAS_REGEX: Lazy<Regex> = Lazy::new(|| {
 static COLLAPSE_COMMAS_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r",{2,}").unwrap());
 
 static COLLAPSE_PERIODS_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").unwrap());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zh_normalize_preserves_comma_space() {
+        assert_eq!(text_normalize_zh("问题, 请修复它。"), "问题, 请修复它.");
+    }
+}

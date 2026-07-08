@@ -21,12 +21,9 @@ static REP_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&parts.join("|")).unwrap()
 });
 
-static RE_ORDINAL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b(\d+)(st|nd|rd|th)\b").unwrap());
-static RE_DECIMAL: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b(\d+)\.(\d+)\b").unwrap());
-static RE_DOLLAR: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\$(\d+(?:\.\d+)?)").unwrap());
+static RE_ORDINAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d+)(st|nd|rd|th)\b").unwrap());
+static RE_DECIMAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d+)\.(\d+)\b").unwrap());
+static RE_DOLLAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"\$(\d+(?:\.\d+)?)").unwrap());
 static RE_INTEGER: Lazy<Regex> = Lazy::new(|| Regex::new(r"\b(\d+)\b").unwrap());
 
 /// Normalize English text for G2P (punctuation + number expansion).

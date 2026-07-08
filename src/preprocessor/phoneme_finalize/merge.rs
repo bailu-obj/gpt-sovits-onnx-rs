@@ -1,8 +1,8 @@
 // Merge per-span G2P + BERT features into one chunk output.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use log::warn;
-use ndarray::{concatenate, Array2, Axis};
+use ndarray::{Array2, Axis, concatenate};
 
 use crate::preprocessor::{
     bert::BertModel,
@@ -24,7 +24,7 @@ pub fn merge_span_results(
     for span in spans {
         let phone_len = span.phone_ids.len();
         if span.lang == Lang::Zh {
-            validate_word2ph(&span.text, &span.word2ph, phone_len);
+            validate_word2ph(&span.text, &span.word2ph, phone_len)?;
         }
 
         let bert_feat = match span.lang {
@@ -49,9 +49,9 @@ pub fn merge_span_results(
 
     inject_silence_tokens(&mut phone_ids, silence_tags);
 
-    let padding = phone_ids.len().saturating_sub(
-        bert_parts.iter().map(|b| b.shape()[0]).sum::<usize>(),
-    );
+    let padding = phone_ids
+        .len()
+        .saturating_sub(bert_parts.iter().map(|b| b.shape()[0]).sum::<usize>());
     if padding > 0 {
         bert_parts.push(bert.get_bert("", &[], padding, Lang::En)?);
     }
@@ -61,7 +61,10 @@ pub fn merge_span_results(
     } else if bert_parts.is_empty() {
         Array2::<f32>::zeros((0, 1024))
     } else {
-        concatenate(Axis(0), &bert_parts.iter().map(|a| a.view()).collect::<Vec<_>>())?
+        concatenate(
+            Axis(0),
+            &bert_parts.iter().map(|a| a.view()).collect::<Vec<_>>(),
+        )?
     };
 
     if bert_merged.shape()[0] != phone_ids.len() {

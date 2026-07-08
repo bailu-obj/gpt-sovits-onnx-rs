@@ -26,7 +26,10 @@ pub fn get_phone_symbol_logged(ph: &str, context: &str) -> i64 {
         Some(&id) => id,
         None => {
             if ph != "UNK" && !ph.is_empty() {
-                warn!("Unknown phoneme '{}' in context '{}', using UNK", ph, context);
+                warn!(
+                    "Unknown phoneme '{}' in context '{}', using UNK",
+                    ph, context
+                );
             }
             SYMBOLS.get("UNK").copied().unwrap_or(86)
         }

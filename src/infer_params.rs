@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::logits_sampler::{SamplingParams, SamplingParamsBuilder};
 use crate::GSVError;
+use crate::logits_sampler::{SamplingParams, SamplingParamsBuilder};
 
 /// Built-in sampling defaults for inference.
 #[derive(Clone, Debug, Deserialize)]
@@ -44,14 +44,15 @@ impl Default for InferParams {
             top_p: default_top_p(),
             temperature: default_temperature(),
             repetition_penalty: default_repetition_penalty(),
-            seed: Some(42),
+            seed: None,
         }
     }
 }
 
 impl InferParams {
     pub fn from_json_str(s: &str) -> Result<Self, GSVError> {
-        serde_json::from_str(s).map_err(|e| GSVError::from(format!("invalid infer params JSON: {e}")))
+        serde_json::from_str(s)
+            .map_err(|e| GSVError::from(format!("invalid infer params JSON: {e}")))
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, GSVError> {
@@ -105,6 +106,6 @@ mod tests {
         let s = p.to_sampling_params();
         assert_eq!(s.top_k, Some(4));
         assert!((s.top_p.unwrap() - 0.9).abs() < 1e-6);
-        assert_eq!(s.seed, Some(42));
+        assert_eq!(s.seed, None);
     }
 }

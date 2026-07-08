@@ -19,7 +19,7 @@ Validated on 2026-07-09 (macOS).
 RUST_LOG=Debug cargo run --release --example gpt_sovits_demo -- \
   --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
   --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "今天天气真不错。"
+  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
 ```
 
 ## Export Results

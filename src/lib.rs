@@ -3,8 +3,7 @@ use futures::{Stream, StreamExt};
 use hound::{WavReader, WavSpec};
 use log::{debug, info};
 use ndarray::{
-    Array, Array1, Array2, ArrayBase, ArrayD, ArrayView2, Axis, IxDyn, OwnedRepr, concatenate,
-    s,
+    Array, Array1, Array2, ArrayBase, ArrayD, ArrayView2, Axis, IxDyn, OwnedRepr, concatenate, s,
 };
 use ort::{
     inputs,
@@ -32,8 +31,8 @@ mod sv;
 use onnx_builder::create_onnx_cpu_session;
 pub use postprocess::{PostprocessParams, audio_postprocess, recovery_order};
 pub use preprocessor::LangId;
-pub use preprocessor::{TextProcessor, bert, en, phoneme_finalize, text_normalize, zh};
 pub use preprocessor::lang::Lang;
+pub use preprocessor::{TextProcessor, bert, en, phoneme_finalize, text_normalize, zh};
 
 use logits_sampler::Sampler;
 use preprocessor::{bert::BertModel, en::g2p_en::G2pEn, zh::g2pw::G2PW};
@@ -66,11 +65,7 @@ fn t2s_num_layers_from_session(session: &Session) -> usize {
         .iter()
         .filter(|input| input.name.starts_with("ik_cache_"))
         .count();
-    if n == 0 {
-        DEFAULT_NUM_LAYERS
-    } else {
-        n
-    }
+    if n == 0 { DEFAULT_NUM_LAYERS } else { n }
 }
 
 fn t2s_kv_io_names(num_layers: usize) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
@@ -219,9 +214,9 @@ impl TTSModel {
     ) -> Result<(), GSVError> {
         info!("Processing reference audio and text: {}", ref_text);
         let ref_text = ensure_punctuation(ref_text);
-        let (ref_norm, ref_phone_ids, ref_bert) =
-            self.text_processor
-                .get_phone_and_bert_whole(&ref_text, lang_id)?;
+        let (ref_norm, ref_phone_ids, ref_bert) = self
+            .text_processor
+            .get_phone_and_bert_whole(&ref_text, lang_id)?;
         let ref_seq = Array2::from_shape_vec((1, ref_phone_ids.len()), ref_phone_ids)?;
         debug!("Reference norm text: {}", ref_norm);
         let (ref_audio_16k, ref_audio_16k_raw, ref_audio_32k) =
@@ -288,9 +283,7 @@ impl TTSModel {
 
     /// Returns the cached SV embedding after [`Self::process_reference`].
     pub fn sv_embedding(&self) -> Option<ArrayD<f32>> {
-        self.ref_data
-            .as_ref()
-            .and_then(|data| data.sv_emb.clone())
+        self.ref_data.as_ref().and_then(|data| data.sv_emb.clone())
     }
 
     /// Cached reference tensors after [`Self::process_reference`].
@@ -431,11 +424,7 @@ impl TTSModel {
                 }
             }
 
-            let sampled = sampler.sample(
-                &mut logits_scratch,
-                &y_vec,
-                &sampling_param,
-            );
+            let sampled = sampler.sample(&mut logits_scratch, &y_vec, &sampling_param);
             y_vec.push(sampled);
 
             let argmax = logits_sampler::argmax(&logits_scratch);
@@ -698,11 +687,7 @@ impl TTSModel {
         let expected_samples = vits_output_samples(semantic_len);
         if let Some(slice) = pred_semantic.as_slice() {
             let preview: Vec<_> = slice.iter().take(8).copied().collect();
-            debug!(
-                "pred_semantic len={}, head={:?}",
-                semantic_len,
-                preview
-            );
+            debug!("pred_semantic len={}, head={:?}", semantic_len, preview);
         }
         let output_audio = outputs["audio"].try_extract_array::<f32>()?;
         let (mut audio, _) = output_audio.into_owned().into_raw_vec_and_offset();
@@ -807,10 +792,11 @@ fn read_and_resample_audio<P: AsRef<Path>>(
         .map(|s| s as f32 / i16::MAX as f32)
         .collect();
 
-    if let Some(&max_abs) = audio_samples
-        .iter()
-        .max_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap_or(std::cmp::Ordering::Equal))
-    {
+    if let Some(&max_abs) = audio_samples.iter().max_by(|a, b| {
+        a.abs()
+            .partial_cmp(&b.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
         if max_abs > 1.0 {
             let scale = max_abs.min(2.0);
             for sample in &mut audio_samples {

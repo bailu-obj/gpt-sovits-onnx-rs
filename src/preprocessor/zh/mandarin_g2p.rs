@@ -43,15 +43,61 @@ fn split_on_punctuation(text: &str) -> Vec<String> {
 }
 
 static MUST_ERHUA: &[&str] = &[
-    "小院儿", "胡同儿", "范儿", "老汉儿", "撒欢儿", "寻老礼儿", "妥妥儿", "媳妇儿",
+    "小院儿",
+    "胡同儿",
+    "范儿",
+    "老汉儿",
+    "撒欢儿",
+    "寻老礼儿",
+    "妥妥儿",
+    "媳妇儿",
 ];
 
 static NOT_ERHUA: &[&str] = &[
-    "虐儿", "为儿", "护儿", "瞒儿", "救儿", "替儿", "有儿", "一儿", "我儿", "俺儿", "妻儿",
-    "拐儿", "聋儿", "乞儿", "患儿", "幼儿", "孤儿", "婴儿", "婴幼儿", "连体儿", "脑瘫儿",
-    "流浪儿", "体弱儿", "混血儿", "蜜雪儿", "舫儿", "祖儿", "美儿", "应采儿", "可儿", "侄儿",
-    "孙儿", "侄孙儿", "女儿", "男儿", "红孩儿", "花儿", "虫儿", "马儿", "鸟儿", "猪儿", "猫儿",
-    "狗儿", "少儿",
+    "虐儿",
+    "为儿",
+    "护儿",
+    "瞒儿",
+    "救儿",
+    "替儿",
+    "有儿",
+    "一儿",
+    "我儿",
+    "俺儿",
+    "妻儿",
+    "拐儿",
+    "聋儿",
+    "乞儿",
+    "患儿",
+    "幼儿",
+    "孤儿",
+    "婴儿",
+    "婴幼儿",
+    "连体儿",
+    "脑瘫儿",
+    "流浪儿",
+    "体弱儿",
+    "混血儿",
+    "蜜雪儿",
+    "舫儿",
+    "祖儿",
+    "美儿",
+    "应采儿",
+    "可儿",
+    "侄儿",
+    "孙儿",
+    "侄孙儿",
+    "女儿",
+    "男儿",
+    "红孩儿",
+    "花儿",
+    "虫儿",
+    "马儿",
+    "鸟儿",
+    "猪儿",
+    "猫儿",
+    "狗儿",
+    "少儿",
 ];
 
 fn load_opencpop() -> HashMap<String, String> {
@@ -107,7 +153,11 @@ pub fn g2p_mandarin(text: &str, g2pw: &mut G2PW, jieba: &Jieba) -> G2pResult {
         .map(|seg| STRIP_EN_RE.replace_all(seg, "").to_string())
         .collect();
 
-    let batch_inputs: Vec<&str> = processed.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+    let batch_inputs: Vec<&str> = processed
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
     let g2pw_batch: Vec<Vec<String>> = if batch_inputs.is_empty() {
         vec![]
     } else {
@@ -142,7 +192,11 @@ pub fn g2p_mandarin(text: &str, g2pw: &mut G2PW, jieba: &Jieba) -> G2pResult {
             let mut sub_initials = Vec::new();
             let mut sub_finals = Vec::new();
             for pinyin in word_pinyins {
-                if pinyin.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+                if pinyin
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_alphabetic())
+                {
                     sub_initials.push(tone_sandhi::to_initials(&pinyin));
                     sub_finals.push(tone_sandhi::to_finals_tone3(&pinyin));
                 } else {
@@ -223,11 +277,71 @@ pub fn g2p_mandarin(text: &str, g2pw: &mut G2PW, jieba: &Jieba) -> G2pResult {
         }
     }
 
+    let norm_text = text.to_string();
+    let word2ph = align_word2ph_to_chars(&norm_text, &phones_list);
+
     G2pResult {
         phones: phones_list,
         word2ph,
-        norm_text: text.to_string(),
+        norm_text,
     }
+}
+
+/// One word2ph entry per norm_text character; values sum to `phones.len()`.
+fn align_word2ph_to_chars(norm_text: &str, phones: &[String]) -> Vec<i32> {
+    let mut out = Vec::with_capacity(norm_text.chars().count());
+    let mut pi = 0usize;
+
+    for c in norm_text.chars() {
+        if c.is_whitespace() {
+            out.push(0);
+            continue;
+        }
+        if pi >= phones.len() {
+            out.push(0);
+            continue;
+        }
+
+        let is_punct = matches!(c, '!' | '?' | '…' | ',' | '.' | '-')
+            || phones[pi] == c.to_string()
+            || is_punctuation_phone(&phones[pi]);
+
+        if is_punct {
+            out.push(1);
+            pi += 1;
+            continue;
+        }
+
+        if pi + 1 < phones.len() && looks_like_syllable_pair(&phones[pi], &phones[pi + 1]) {
+            out.push(2);
+            pi += 2;
+        } else {
+            out.push(1);
+            pi += 1;
+        }
+    }
+
+    debug_assert_eq!(
+        out.iter().map(|&n| n.max(0) as usize).sum::<usize>(),
+        phones.len()
+    );
+    out
+}
+
+fn is_punctuation_phone(phone: &str) -> bool {
+    phone.len() <= 2
+        && phone
+            .chars()
+            .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_digit())
+        && PUNCTUATION.contains(&phone)
+}
+
+fn looks_like_syllable_pair(initial: &str, final_tone: &str) -> bool {
+    initial.len() <= 2
+        && final_tone
+            .chars()
+            .last()
+            .map_or(false, |c| c.is_ascii_digit())
 }
 
 fn correct_pronunciation(word: &str, mut word_pinyins: Vec<String>) -> Vec<String> {
@@ -261,8 +375,7 @@ fn merge_erhua(
         }
     }
 
-    if !MUST_ERHUA.contains(&word)
-        && (NOT_ERHUA.contains(&word) || matches!(pos, "a" | "j" | "nr"))
+    if !MUST_ERHUA.contains(&word) && (NOT_ERHUA.contains(&word) || matches!(pos, "a" | "j" | "nr"))
     {
         return (initials, finals);
     }
@@ -275,10 +388,7 @@ fn merge_erhua(
     let mut new_finals: Vec<String> = Vec::new();
     for i in 0..finals.len() {
         let mut phn = finals[i].clone();
-        if i == finals.len() - 1
-            && chars.get(i) == Some(&'儿')
-            && (phn == "er2" || phn == "er5")
-        {
+        if i == finals.len() - 1 && chars.get(i) == Some(&'儿') && (phn == "er2" || phn == "er5") {
             let suffix = if chars.len() >= 2 {
                 chars[chars.len() - 2..].iter().collect::<String>()
             } else {
@@ -306,5 +416,16 @@ mod tests {
     fn test_correct_pronunciation_dict() {
         let result = correct_pronunciation("行", vec!["xing2".to_string()]);
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_word2ph_aligns_after_comma_space() {
+        let mut g2pw = G2PW::new(None::<&str>).unwrap();
+        let jieba = Jieba::new();
+        let result = g2p_mandarin("问题, 请修复它.", &mut g2pw, &jieba);
+        let phone_count = result.phones.len();
+        let w2p_sum: i32 = result.word2ph.iter().sum();
+        assert_eq!(w2p_sum as usize, phone_count);
+        assert_eq!(result.word2ph.len(), result.norm_text.chars().count());
     }
 }

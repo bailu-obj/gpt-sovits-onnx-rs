@@ -131,7 +131,7 @@ python scripts/optimize_aio.py --input-dir onnx/custom --output-dir onnx-patched
 | `top_p` | 0.9 |
 | `temperature` | 1.0 |
 | `repetition_penalty` | 1.35 |
-| `seed` | 42 |
+| `seed` | random（不设固定 seed；对比脚本使用 `COMPARE_SEED=42`） |
 
 - Rust：`InferParams::default()`；demo 可用 `--top-k` 等 CLI 覆盖
 - Python：[`scripts/sampling_defaults.py`](sampling_defaults.py)；`run_python_baseline.py` 内置相同默认值
@@ -151,7 +151,7 @@ curl -fL -o "${MODEL_DIR}/ref.wav" \
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
-  --text "今天天气真不错。" \
+  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
   --ref-text "格式化，可以给自家的奶带来大量的。" \
   --output output.wav
 ```
@@ -162,9 +162,11 @@ cargo run --release --example gpt_sovits_demo -- \
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
   --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "今天天气真不错。" \
-  --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35 --seed 42
+  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
+  --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35
 ```
+
+对比脚本默认 `--seed 42`（`compare_onnx_versions.py` / `compare_infer_metrics.py`）。
 
 V2Pro / V2ProPlus 目录需包含 `sv.onnx`；demo 会自动检测。`05_export.sh --smoke-test` 也需要模型目录下已有 `ref.wav`。
 
@@ -195,7 +197,7 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_infer_metrics.py \
 ```bash
 cargo run --release --example dump_rust_t2s -- \
   --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
-  --text "今天天气真不错。" \
+  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
   --ref-text "格式化，可以给自家的奶带来大量的。"
 ```
 

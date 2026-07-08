@@ -1,11 +1,6 @@
 use ndarray::Array;
 use ort::value::Tensor;
-use std::{
-    fmt::Debug,
-    path::Path,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{fmt::Debug, path::Path, str::FromStr, sync::Arc};
 use tokenizers::Tokenizer;
 
 use crate::{onnx_builder::create_onnx_cpu_session, preprocessor::utils::*};

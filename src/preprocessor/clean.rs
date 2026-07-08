@@ -1,6 +1,6 @@
 // Global text cleaning before chunking and language segmentation.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::preprocessor::text_normalize;
 
@@ -107,5 +107,7 @@ fn apply_special_symbols(text: &str) -> (String, Vec<SilenceMarker>) {
 pub fn infer_lang_en(text: &str) -> bool {
     let t = text.trim();
     t.chars().any(|c| c.is_ascii_alphabetic())
-        && !t.chars().any(|c| matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF))
+        && !t
+            .chars()
+            .any(|c| matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF))
 }

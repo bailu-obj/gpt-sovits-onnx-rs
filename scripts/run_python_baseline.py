@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--text",
-        default="今天天气真不错。",
+        default="你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。",
         help="Text to synthesize",
     )
     parser.add_argument(
@@ -51,7 +51,12 @@ def parse_args() -> argparse.Namespace:
         default=["v2", "v2Pro", "v2ProPlus"],
         help="Model versions to run",
     )
-    parser.add_argument("--seed", type=int, default=DEFAULT_SAMPLING["seed"])
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=-1,
+        help="Random seed (-1 for random; compare scripts pass a fixed seed)",
+    )
     parser.add_argument(
         "--params",
         type=Path,
@@ -63,11 +68,11 @@ def parse_args() -> argparse.Namespace:
 
 def build_sampling(args: argparse.Namespace) -> dict:
     sampling = dict(DEFAULT_SAMPLING)
-    sampling["seed"] = args.seed
     if args.params is not None:
         with args.params.open(encoding="utf-8") as f:
             overrides = json.load(f)
         sampling.update(overrides)
+    sampling["seed"] = args.seed
     return sampling
 
 

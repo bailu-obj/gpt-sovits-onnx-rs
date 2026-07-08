@@ -255,20 +255,23 @@ fn is_han(c: char) -> bool {
 fn is_punct_token(token: &str) -> bool {
     token.chars().all(|c| {
         PUNCT_CHARS.contains(&c)
-            || matches!(c, ';' | ':' | '(' | ')' | '[' | ']' | '<' | '>' | '-' | '~' | '$' | '/')
+            || matches!(
+                c,
+                ';' | ':' | '(' | ')' | '[' | ']' | '<' | '>' | '-' | '~' | '$' | '/'
+            )
     })
 }
 
 fn starts_with_punct(text: &str) -> bool {
-    text.chars()
-        .next()
-        .map_or(false, |c| c.is_ascii_punctuation() || PUNCT_CHARS.contains(&c))
+    text.chars().next().map_or(false, |c| {
+        c.is_ascii_punctuation() || PUNCT_CHARS.contains(&c)
+    })
 }
 
 fn ends_with_punct(text: &str) -> bool {
-    text.chars()
-        .last()
-        .map_or(false, |c| c.is_ascii_punctuation() || PUNCT_CHARS.contains(&c))
+    text.chars().last().map_or(false, |c| {
+        c.is_ascii_punctuation() || PUNCT_CHARS.contains(&c)
+    })
 }
 
 #[cfg(test)]

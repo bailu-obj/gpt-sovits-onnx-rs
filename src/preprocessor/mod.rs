@@ -24,10 +24,10 @@ pub use text_normalize::text_normalize;
 
 use crate::preprocessor::{
     bert::BertModel,
-    clean::{infer_lang_en, normalize_input, silence_tags_for_chunk, CleanedInput},
+    clean::{CleanedInput, infer_lang_en, normalize_input, silence_tags_for_chunk},
     en::g2p_en::G2pEn,
     g2p::{G2pDeps, g2p_spans},
-    phoneme_finalize::{needs_short_retry, ChunkInput, ChunkOutput},
+    phoneme_finalize::{ChunkInput, ChunkOutput, needs_short_retry},
     seg::pre_seg_text,
     zh::g2pw::G2PW,
 };
@@ -115,8 +115,7 @@ impl TextProcessor {
             return Ok(None);
         }
 
-        let silence_tags =
-            silence_tags_for_chunk(&cleaned.silence_markers, &cleaned.text, chunk);
+        let silence_tags = silence_tags_for_chunk(&cleaned.silence_markers, &cleaned.text, chunk);
 
         let mut deps = G2pDeps {
             g2pw: &mut self.g2pw,

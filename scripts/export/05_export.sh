@@ -132,6 +132,6 @@ if $SMOKE_TEST; then
         cargo run --release --example gpt_sovits_demo -- \
             --model-path "${local_model}" \
             --ref-text "你好，这是一段参考文本。" \
-            --text "今天天气真不错。"
+            --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
     )
 fi

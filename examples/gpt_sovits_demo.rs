@@ -16,7 +16,10 @@ struct Args {
     params: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
     run_count: usize,
-    #[arg(long, default_value = "今天天气真不错。")]
+    #[arg(
+        long,
+        default_value = "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
+    )]
     text: String,
     #[arg(long, default_value = "zh")]
     lang: String,
@@ -104,7 +107,10 @@ fn find_model_prefix(assets_dir: &Path) -> Result<String, GSVError> {
     }
 
     for entry in std::fs::read_dir(assets_dir).map_err(|e| {
-        GSVError::FileNotFound(format!("Failed to read model directory {:?}: {}", assets_dir, e))
+        GSVError::FileNotFound(format!(
+            "Failed to read model directory {:?}: {}",
+            assets_dir, e
+        ))
     })? {
         let entry = entry.map_err(|e| GSVError::from(e.to_string()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -122,7 +128,8 @@ fn find_model_prefix(assets_dir: &Path) -> Result<String, GSVError> {
 fn create_model(assets_dir: &Path) -> Result<TTSModel, GSVError> {
     if !assets_dir.exists() {
         return Err(GSVError::FileNotFound(format!(
-            "Assets directory not found: {:?}", assets_dir
+            "Assets directory not found: {:?}",
+            assets_dir
         )));
     }
     let prefix = find_model_prefix(assets_dir)?;
@@ -167,12 +174,8 @@ fn run_sync_inference(
     let sampling = infer.to_sampling_params();
     for i in 0..runs {
         let start = Instant::now();
-        let (spec, samples) = model.synthesize_sync(
-            text,
-            sampling,
-            lang_id,
-            PostprocessParams::default(),
-        )?;
+        let (spec, samples) =
+            model.synthesize_sync(text, sampling, lang_id, PostprocessParams::default())?;
         if i == runs - 1 {
             write_wav(spec, &samples, output_file)?;
         }
@@ -193,17 +196,10 @@ fn main() -> Result<(), GSVError> {
         LangId::Auto,
     )?;
 
-    println!(
-        "text: {:?} ref_text: {:?}",
-        args.text, args.ref_text
-    );
+    println!("text: {:?} ref_text: {:?}", args.text, args.ref_text);
     println!(
         "infer params: top_k={} top_p={} temperature={} repetition_penalty={} seed={:?}",
-        infer.top_k,
-        infer.top_p,
-        infer.temperature,
-        infer.repetition_penalty,
-        infer.seed
+        infer.top_k, infer.top_p, infer.temperature, infer.repetition_penalty, infer.seed
     );
 
     let stats = run_sync_inference(

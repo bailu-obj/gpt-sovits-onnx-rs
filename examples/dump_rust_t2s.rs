@@ -10,7 +10,10 @@ struct Args {
     params: Option<PathBuf>,
     #[arg(long, default_value = "格式化，可以给自家的奶带来大量的。")]
     ref_text: String,
-    #[arg(long, default_value = "今天天气真不错。")]
+    #[arg(
+        long,
+        default_value = "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
+    )]
     text: String,
 }
 
@@ -41,7 +44,8 @@ fn main() -> Result<(), GSVError> {
         args.model_path.join(format!("{prefix}_vits.onnx")),
         args.model_path.join("ssl.onnx"),
         args.model_path.join(format!("{prefix}_t2s_encoder.onnx")),
-        args.model_path.join(format!("{prefix}_t2s_fs_decoder.onnx")),
+        args.model_path
+            .join(format!("{prefix}_t2s_fs_decoder.onnx")),
         args.model_path.join(format!("{prefix}_t2s_s_decoder.onnx")),
         Some(args.model_path.join("bert.onnx")),
         Some(args.model_path.join("g2pW.onnx")),

@@ -4,12 +4,12 @@ use anyhow::Result;
 use log::warn;
 
 use crate::preprocessor::{
-    en::{g2p_en::G2pEn, normalize::text_normalize_en, EnSentence, EnWord},
+    en::{EnSentence, EnWord, g2p_en::G2pEn, normalize::text_normalize_en},
     lang::{Lang, LangId},
     lang_segment::LangSpan,
-    phoneme_finalize::{finalize_span_zh},
+    phoneme_finalize::finalize_span_zh,
     text_normalize::text_normalize_zh,
-    zh::{g2pw::G2PW, ZhMode, ZhSentence},
+    zh::{ZhMode, ZhSentence, g2pw::G2PW},
 };
 use jieba_rs::Jieba;
 

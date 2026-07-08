@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sampling_defaults import DEFAULT_SAMPLING
+from sampling_defaults import COMPARE_SEED, DEFAULT_SAMPLING
 
 
 def audio_stats(path: Path) -> dict:
@@ -73,6 +73,7 @@ def run_python(
     out_dir: Path,
     text: str,
     ref_text: str,
+    seed: int,
 ) -> Path:
     cmd = [
         str(upstream / ".venv/bin/python"),
@@ -87,6 +88,8 @@ def run_python(
         text,
         "--ref-text",
         ref_text,
+        "--seed",
+        str(seed),
     ]
     _append_params(cmd, params_path)
     subprocess.run(cmd, check=True, cwd=repo)
@@ -100,6 +103,7 @@ def run_rust(
     out_path: Path,
     text: str,
     ref_text: str,
+    seed: int,
 ) -> None:
     cmd = [
         "cargo",
@@ -114,6 +118,8 @@ def run_rust(
         text,
         "--ref-text",
         ref_text,
+        "--seed",
+        str(seed),
         "--output",
         str(out_path),
     ]
@@ -168,13 +174,19 @@ def main() -> int:
     )
     parser.add_argument(
         "--text",
-        default="今天天气真不错。",
+        default="你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。",
         help="Text to synthesize",
     )
     parser.add_argument(
         "--ref-text",
         default="格式化，可以给自家的奶带来大量的。",
         help="Reference prompt text",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=COMPARE_SEED,
+        help="Fixed seed for reproducible Rust vs Python comparison",
     )
     parser.add_argument(
         "--versions",
@@ -188,6 +200,7 @@ def main() -> int:
     upstream = repo / "gpt-sovits-upstream"
     report = {
         "sampling_defaults": DEFAULT_SAMPLING,
+        "seed": args.seed,
         "text": args.text,
         "ref_text": args.ref_text,
         "versions": {},
@@ -203,10 +216,18 @@ def main() -> int:
         use_params = resolve_params_path(args.params, bundle)
 
         py_out = run_python(
-            repo, upstream, version, use_params, bundle / "ref.wav", repo, args.text, args.ref_text
+            repo,
+            upstream,
+            version,
+            use_params,
+            bundle / "ref.wav",
+            repo,
+            args.text,
+            args.ref_text,
+            args.seed,
         )
         rs_out = repo / f"output_{version.lower()}.wav"
-        run_rust(repo, bundle, use_params, rs_out, args.text, args.ref_text)
+        run_rust(repo, bundle, use_params, rs_out, args.text, args.ref_text, args.seed)
 
         py_stats = audio_stats(py_out)
         rs_stats = audio_stats(rs_out)

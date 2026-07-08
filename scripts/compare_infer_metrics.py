@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sampling_defaults import DEFAULT_SAMPLING
+from sampling_defaults import COMPARE_SEED, DEFAULT_SAMPLING
 
 
 def audio_stats(path: Path) -> dict:
@@ -122,7 +122,12 @@ def main() -> int:
         default=None,
         help="onnx-patched bundle for Rust demo",
     )
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=COMPARE_SEED,
+        help="Fixed seed for reproducible Rust vs Python comparison",
+    )
     parser.add_argument(
         "--params",
         type=Path,
@@ -131,7 +136,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--text",
-        default="今天天气真不错。",
+        default="你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。",
         help="Text to synthesize",
     )
     parser.add_argument(
@@ -173,6 +178,8 @@ def main() -> int:
         text,
         "--ref-text",
         ref_text,
+        "--seed",
+        str(args.seed),
     ]
     if params_path is not None:
         py_cmd.extend(["--params", str(params_path)])
@@ -192,6 +199,8 @@ def main() -> int:
         text,
         "--ref-text",
         ref_text,
+        "--seed",
+        str(args.seed),
     ]
     if params_path is not None:
         rs_cmd.extend(["--params", str(params_path)])
@@ -205,6 +214,7 @@ def main() -> int:
         "inputs": {
             "params_file": str(params_path) if params_path else None,
             "sampling_defaults": DEFAULT_SAMPLING,
+            "seed": args.seed,
             "ref_audio": str(ref_audio),
             "ref_text": ref_text,
             "text": text,

@@ -91,10 +91,7 @@ mod tests {
 
     #[test]
     fn recovery_order_restores_sequence() {
-        let batches = vec![
-            vec![vec![1.0], vec![2.0]],
-            vec![vec![3.0]],
-        ];
+        let batches = vec![vec![vec![1.0], vec![2.0]], vec![vec![3.0]]];
         let index_list = vec![vec![0, 2], vec![1]];
         let ordered = recovery_order(batches, &index_list);
         assert_eq!(ordered.len(), 3);

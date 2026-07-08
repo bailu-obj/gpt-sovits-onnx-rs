@@ -59,7 +59,10 @@ impl ToneSandhi {
         for j in 0..chars.len() {
             if j > 0
                 && chars[j] == chars[j - 1]
-                && pos.chars().next().map_or(false, |c| matches!(c, 'n' | 'v' | 'a'))
+                && pos
+                    .chars()
+                    .next()
+                    .map_or(false, |c| matches!(c, 'n' | 'v' | 'a'))
                 && !MUST_NOT_NEURAL.contains(word)
             {
                 if let Some(f) = finals.get_mut(j) {
@@ -160,12 +163,7 @@ impl ToneSandhi {
 
     fn yi_sandhi(&self, word: &str, mut finals: Vec<String>) -> Vec<String> {
         let chars: Vec<char> = word.chars().collect();
-        if word.contains('一')
-            && chars
-                .iter()
-                .filter(|c| **c != '一')
-                .all(|c| c.is_numeric())
-        {
+        if word.contains('一') && chars.iter().filter(|c| **c != '一').all(|c| c.is_numeric()) {
             return finals;
         }
         if chars.len() == 3 && chars[1] == '一' && chars[0] == chars[2] {
@@ -277,10 +275,7 @@ impl ToneSandhi {
     }
 
     fn merge_continuous_three_tones(&self, seg: Seg) -> Seg {
-        let sub_finals: Vec<Vec<String>> = seg
-            .iter()
-            .map(|(w, _)| lazy_finals_tone3(w))
-            .collect();
+        let sub_finals: Vec<Vec<String>> = seg.iter().map(|(w, _)| lazy_finals_tone3(w)).collect();
         let mut new_seg: Seg = Vec::new();
         let mut merge_last = vec![false; seg.len()];
         for i in 0..seg.len() {
@@ -305,10 +300,7 @@ impl ToneSandhi {
     }
 
     fn merge_continuous_three_tones_2(&self, seg: Seg) -> Seg {
-        let sub_finals: Vec<Vec<String>> = seg
-            .iter()
-            .map(|(w, _)| lazy_finals_tone3(w))
-            .collect();
+        let sub_finals: Vec<Vec<String>> = seg.iter().map(|(w, _)| lazy_finals_tone3(w)).collect();
         let mut new_seg: Seg = Vec::new();
         let mut merge_last = vec![false; seg.len()];
         for i in 0..seg.len() {
@@ -391,7 +383,12 @@ pub fn to_initials(pinyin: &str) -> String {
     for ini in INITIALS {
         if pinyin.starts_with(ini) {
             let rest = &pinyin[ini.len()..];
-            if rest.is_empty() || rest.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+            if rest.is_empty()
+                || rest
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_alphabetic())
+            {
                 return ini.to_string();
             }
         }
@@ -407,7 +404,12 @@ pub fn to_finals_tone3(pinyin: &str) -> String {
         pinyin[ini.len()..].to_string()
     };
     // Python pypinyin neutral_tone_with_five=True
-    if !final_part.is_empty() && !final_part.chars().last().map_or(false, |c| c.is_ascii_digit()) {
+    if !final_part.is_empty()
+        && !final_part
+            .chars()
+            .last()
+            .map_or(false, |c| c.is_ascii_digit())
+    {
         final_part.push('5');
     }
     final_part

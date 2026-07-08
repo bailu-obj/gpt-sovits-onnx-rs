@@ -1,6 +1,6 @@
 use rand::Rng;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 const T2S_DECODER_EOS: i64 = 1024;
 
@@ -107,7 +107,11 @@ fn apply_top_p(logits: &mut [f32], top_p: f32) {
         return;
     }
     let mut order: Vec<usize> = (0..logits.len()).collect();
-    order.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|&a, &b| {
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let sorted_logits: Vec<f32> = order.iter().map(|&i| logits[i]).collect();
     let max_l = sorted_logits[0];

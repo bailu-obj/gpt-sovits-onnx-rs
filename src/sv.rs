@@ -1,11 +1,7 @@
 use log::debug;
 use ndarray::Array2;
 use ndarray::ArrayD;
-use ort::{
-    inputs,
-    session::Session,
-    value::TensorRef,
-};
+use ort::{inputs, session::Session, value::TensorRef};
 
 use crate::GSVError;
 
@@ -40,10 +36,7 @@ fn compute_kaldi_fbank(samples: &[f32]) -> Result<Array2<f32>, GSVError> {
     };
 
     let frames_array = Array2::from_shape_vec(
-        (
-            result.num_frames as usize,
-            result.num_bins as usize,
-        ),
+        (result.num_frames as usize, result.num_bins as usize),
         frames,
     )
     .map_err(|e| GSVError::from(format!("SV fbank reshape failed: {e}")))?;
@@ -85,7 +78,8 @@ mod tests {
 
     #[test]
     fn kaldi_fbank_frame_count_matches_python_reference() {
-        let wav_path = std::path::Path::new("gpt-sovits-upstream/onnx-patched/custom_v2proplus/ref.wav");
+        let wav_path =
+            std::path::Path::new("gpt-sovits-upstream/onnx-patched/custom_v2proplus/ref.wav");
         if !wav_path.exists() {
             return;
         }

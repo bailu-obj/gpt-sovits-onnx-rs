@@ -28,7 +28,8 @@ fn main() -> Result<(), GSVError> {
         args.model_path.join(format!("{prefix}_vits.onnx")),
         args.model_path.join("ssl.onnx"),
         args.model_path.join(format!("{prefix}_t2s_encoder.onnx")),
-        args.model_path.join(format!("{prefix}_t2s_fs_decoder.onnx")),
+        args.model_path
+            .join(format!("{prefix}_t2s_fs_decoder.onnx")),
         args.model_path.join(format!("{prefix}_t2s_s_decoder.onnx")),
         Some(args.model_path.join("bert.onnx")),
         Some(args.model_path.join("g2pW.onnx")),

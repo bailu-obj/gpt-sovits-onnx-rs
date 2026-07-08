@@ -21,9 +21,9 @@ Rust pays a larger one-time cost on first `cargo run` (ONNX session creation + `
 
 | Item | Value |
 |------|--------|
-| Text | `今天天气真不错。` |
+| Text | `你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。` |
 | Ref text | `格式化，可以给自家的奶带来大量的。` |
-| Sampling | `top_k=4`, `top_p=0.9`, `temperature=1.0`, `repetition_penalty=1.35`, `seed=42` |
+| Sampling | `top_k=4`, `top_p=0.9`, `temperature=1.0`, `repetition_penalty=1.35`; `seed=42` only in compare scripts |
 | PyTorch device | CPU (`is_half=False`) |
 | Rust | Release build, ONNX Runtime CPU EP |
 | Timed runs | 10 (Python: 2 warmup discarded) |

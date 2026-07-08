@@ -1,13 +1,10 @@
 // Symbol-string → phone ID mapping and padding (Python cleaner.py + cleaned_text_to_sequence).
 
-use crate::preprocessor::phone_symbol::{get_phone_symbol_logged, SYMBOLS};
+use crate::preprocessor::phone_symbol::{SYMBOLS, get_phone_symbol_logged};
 
 /// Map phoneme symbol strings to integer IDs; unknown → UNK (Python cleaner.py).
 pub fn phones_to_ids(phones: &[String], context: &str) -> Vec<i64> {
-    phones
-        .iter()
-        .map(|ph| phone_to_id(ph, context))
-        .collect()
+    phones.iter().map(|ph| phone_to_id(ph, context)).collect()
 }
 
 pub fn phone_to_id(ph: &str, context: &str) -> i64 {
