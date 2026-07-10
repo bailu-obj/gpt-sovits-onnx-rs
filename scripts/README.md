@@ -140,12 +140,11 @@ python scripts/optimize_aio.py --input-dir onnx/custom --output-dir onnx-patched
 
 ## Rust 推理验证
 
-将 [示例参考音频 ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav) 放到模型目录（与 ONNX 文件同级）：
+下载量化版模型目录（含 `ref.wav`、`g2p_en/` 与全部 ONNX 文件）：
 
 ```bash
-MODEL_DIR=/path/to/onnx-patched/custom
-curl -fL -o "${MODEL_DIR}/ref.wav" \
-  https://huggingface.co/mikv39/gpt-sovits-onnx-custom/resolve/main/ref.wav
+huggingface-cli download mikv39/gpt-sovits-onnx-custom quant --local-dir ./gpt-sovits-onnx-custom-quant
+MODEL_DIR=./gpt-sovits-onnx-custom-quant
 ```
 
 ```bash

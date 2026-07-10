@@ -81,25 +81,30 @@
 如果您不想自行训练和导出模型，可以使用预训练模型进行快速体验。
 
 * **主模型下载地址**：[huggingface.co/mikv39/gpt-sovits-onnx-custom](https://huggingface.co/mikv39/gpt-sovits-onnx-custom)
-* 该模型可直接在 [gpt-sovits-android-demo](https://github.com/null-define/gpt-sovits-android-demo/tree/master) 中加载使用，或者直接替换examples下的gpt_sovits_demo中的模型地址。
+* 仓库提供两个子目录：`quant/`（量化版，约 0.9 GB，推荐）和 `unquant/`（全精度版，约 2.8 GB）。下载后将整个子目录作为 `--model-path` 传入。
 
 > **版权声明**：此模型使用了受版权保护的音视频素材进行微调，请勿用于任何商业用途。
 
-**gp2en模型下载** 建议下载，参见[cisco-ai/mini-bart-g2p](https://huggingface.co/cisco-ai/mini-bart-g2p/tree/main/onnx),下载完成后可以把模型目录文件夹设置为TTSModel的g2p_en_path参数，启用gp2 en模型支持。默认的demo和JNI都启用了gp2 en模型，需要在原来的目录下新建一个g2p_en文件夹，把下载的模型放进去。（macOS 导出流程会在 `04_download_models.sh` 自动下载 g2p_en。）
+**g2p_en 英文 G2P**：HF 预训练包已内置 `g2p_en/`。若自行导出模型，macOS 流程会在 `04_download_models.sh` 自动下载；也可从 [cisco-ai/mini-bart-g2p](https://huggingface.co/cisco-ai/mini-bart-g2p/tree/main/onnx) 手动获取并放入模型目录的 `g2p_en/` 子文件夹。
 
 ### 参考音频（ref.wav）
 
-`gpt_sovits_demo` 会从模型目录读取 `ref.wav` 作为参考音色。可使用我们之前配套的示例音频：
+`gpt_sovits_demo` 会从模型目录读取 `ref.wav` 作为参考音色。HF 预训练包的 `quant/` 与 `unquant/` 目录均已包含 `ref.wav`。
 
-- 文件：[mikv39/gpt-sovits-onnx-custom — ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav)
 - 建议参考文本（与示例音频匹配）：`格式化，可以给自家的奶带来大量的。`
 
-下载到模型目录（与 `custom_vits.onnx` 等同级）：
+下载量化版模型目录（含 `ref.wav`、`g2p_en/` 与全部 ONNX 文件）：
 
 ```bash
-MODEL_DIR=/path/to/onnx-patched/custom
-curl -fL -o "${MODEL_DIR}/ref.wav" \
-  https://huggingface.co/mikv39/gpt-sovits-onnx-custom/resolve/main/ref.wav
+huggingface-cli download mikv39/gpt-sovits-onnx-custom quant --local-dir ./gpt-sovits-onnx-custom-quant
+MODEL_DIR=./gpt-sovits-onnx-custom-quant
+```
+
+全精度版：
+
+```bash
+huggingface-cli download mikv39/gpt-sovits-onnx-custom unquant --local-dir ./gpt-sovits-onnx-custom-unquant
+MODEL_DIR=./gpt-sovits-onnx-custom-unquant
 ```
 
 运行 demo 时通过 CLI 指定参考文本与合成文本；采样参数使用程序内置默认值：
@@ -175,7 +180,7 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 cargo build --release
 ```
 
-使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `*_vits.onnx` 自动选择 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先将 [ref.wav](https://huggingface.co/mikv39/gpt-sovits-onnx-custom/blob/main/ref.wav) 下载到模型目录，见上文「参考音频」一节。
+使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `*_vits.onnx` 自动选择 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先下载 `quant/` 或 `unquant/` 子目录（含 `ref.wav`），见上文「参考音频」一节。
 
 ```bash
 RUST_LOG=debug cargo run --release --example gpt_sovits_demo -- \
