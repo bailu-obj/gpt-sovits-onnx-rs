@@ -34,6 +34,20 @@ pub fn audio_postprocess(
     merge::flatten_and_concat(processed, params.split_bucket, batch_index_list)
 }
 
+/// Normalize one fragment and append trailing silence — used for real streaming.
+pub fn process_single_fragment(
+    mut samples: Vec<f32>,
+    sample_rate: u32,
+    fragment_interval: f32,
+) -> Vec<f32> {
+    normalize::normalize_fragment(&mut samples);
+    if fragment_interval > 0.0 {
+        let pad = (sample_rate as f32 * fragment_interval) as usize;
+        samples.extend(std::iter::repeat_n(0.0f32, pad));
+    }
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +67,17 @@ mod tests {
         assert_eq!(out.len(), 2 + 9600 + 10 + 9600);
         assert!((out[0] - 1.0).abs() < 1e-6);
         assert!((out[1] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn process_single_fragment_matches_batch_path() {
+        let single = process_single_fragment(vec![2.0, -2.0], 32000, 0.3);
+        let batch = audio_postprocess(
+            vec![vec![vec![2.0, -2.0]]],
+            32000,
+            &PostprocessParams::default(),
+            None,
+        );
+        assert_eq!(single, batch);
     }
 }

@@ -21,7 +21,7 @@
 * **完整的 Android 构建支持**：提供了 `build_for_android.sh` 脚本，自动化处理 ONNX Runtime 的源码下载、编译及项目构建，解决了官方 `ort-rs` 缺少 Android 预构建包的问题。
 
 
-* 详细性能数据请参考 [**性能记录 (perf\_record)**](doc/perf_record.md) 与 [**PyTorch vs ONNX 速度对比**](doc/pytorch_vs_onnx_speed.md)（2026-07-09，v2Pro / v2ProPlus CPU）。
+* 当前 Apple Silicon 延迟 / RSS：见 [**ONNX 导出 CPU 优化**](doc/onnx_export_cpu_optimization.md)（`fast` / `quality` / `fp32` / `fp16` 预设）。运行时说明见 [**CPU 优化笔记**](doc/cpu_improvements.md)；历史平台数据见 [**perf_record**](doc/perf_record.md)；跨框架对比见 [**PyTorch vs ONNX**](doc/pytorch_vs_onnx_speed.md)。
 * 通过在运行时设置lang_id为LangId::AutoYue，可以启用粤语模式。
 
 -----
@@ -81,7 +81,7 @@
 如果您不想自行训练和导出模型，可以使用预训练模型进行快速体验。
 
 * **主模型下载地址**：[huggingface.co/mikv39/gpt-sovits-onnx-custom](https://huggingface.co/mikv39/gpt-sovits-onnx-custom)
-* 仓库提供两个子目录：`quant/`（量化版，约 0.9 GB，推荐）和 `unquant/`（全精度版，约 2.8 GB）。下载后将整个子目录作为 `--model-path` 传入。
+* HF 仍发布两个目录名（与导出预设对应）：`quant/` ≈ **`fast`**（INT8 T2S + INT4 BERT/g2pW，约 0.9 GB，推荐），`unquant/` ≈ **`fp32`**（约 2.8 GB）。自行导出请用 `--precision fast|quality|fp32|fp16`（见 [scripts/README.md](scripts/README.md)）。
 
 > **版权声明**：此模型使用了受版权保护的音视频素材进行微调，请勿用于任何商业用途。
 
@@ -89,22 +89,17 @@
 
 ### 参考音频（ref.wav）
 
-`gpt_sovits_demo` 会从模型目录读取 `ref.wav` 作为参考音色。HF 预训练包的 `quant/` 与 `unquant/` 目录均已包含 `ref.wav`。
+`gpt_sovits_demo` 会从模型目录读取 `ref.wav` 作为参考音色。HF 包的 `quant/` 与 `unquant/` 均已包含 `ref.wav`。
 
 - 建议参考文本（与示例音频匹配）：`格式化，可以给自家的奶带来大量的。`
 
-下载量化版模型目录（含 `ref.wav`、`g2p_en/` 与全部 ONNX 文件）：
-
 ```bash
+# 推荐：fast 对应的 HF quant/
 huggingface-cli download mikv39/gpt-sovits-onnx-custom quant --local-dir ./gpt-sovits-onnx-custom-quant
 MODEL_DIR=./gpt-sovits-onnx-custom-quant
-```
 
-全精度版：
-
-```bash
-huggingface-cli download mikv39/gpt-sovits-onnx-custom unquant --local-dir ./gpt-sovits-onnx-custom-unquant
-MODEL_DIR=./gpt-sovits-onnx-custom-unquant
+# 全精度：fp32 对应的 HF unquant/
+# huggingface-cli download mikv39/gpt-sovits-onnx-custom unquant --local-dir ./gpt-sovits-onnx-custom-unquant
 ```
 
 运行 demo 时通过 CLI 指定参考文本与合成文本；采样参数使用程序内置默认值：
@@ -162,11 +157,11 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 ./scripts/export/02_patch.sh
 ./scripts/export/03_setup_env.sh --source HF
 ./scripts/export/04_download_models.sh --version v2Pro
-./scripts/export/05_export.sh --version v2Pro --export-name custom --no-quant
+./scripts/export/05_export.sh --version v2Pro --export-name custom --precision fast
 
 # v2ProPlus（与 v2Pro 共用 SV 分支，仅 SoVITS 权重不同）
 ./scripts/export/04_download_models.sh --version v2ProPlus
-./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --no-quant
+./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --precision fast
 ./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/custom_v2proplus --expect-v2pro
 ```
 
@@ -180,7 +175,7 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 cargo build --release
 ```
 
-使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `*_vits.onnx` 自动选择 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先下载 `quant/` 或 `unquant/` 子目录（含 `ref.wav`），见上文「参考音频」一节。
+使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `*_vits.onnx` 自动选择 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先下载 HF `quant/`（fast）或 `unquant/`（fp32）子目录（含 `ref.wav`），见上文「参考音频」一节。
 
 ```bash
 RUST_LOG=debug cargo run --release --example gpt_sovits_demo -- \
@@ -190,7 +185,7 @@ RUST_LOG=debug cargo run --release --example gpt_sovits_demo -- \
   --output output.wav
 ```
 
-Demo 支持 `--text`、`--ref-text`、`--top-k`、`--top-p`、`--temperature`、`--repetition-penalty`、`--seed`、`--output` 等参数；可选 `--params` 覆盖内置采样默认值。
+Demo 支持 `--text`、`--ref-text`、`--top-k`、`--top-p`、`--temperature`、`--repetition-penalty`、`--seed`、`--output`、`--benchmark`（cold init / TTFA / RSS / p95）、`--ort-profile latency|low-power`、`--ort-threads` 等参数；可选 `--params` 覆盖内置采样默认值。
 
 ### 3\. Android 平台构建
 

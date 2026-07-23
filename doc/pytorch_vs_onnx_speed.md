@@ -2,6 +2,8 @@
 
 Validated on **2026-07-09** (macOS, CPU only).
 
+> **Note:** This page uses the **pre-layout** v2Pro / v2ProPlus patched bundles and the **long demo mixed CN/EN** text. It is **not** comparable to the short/multi Apple Silicon table in [`onnx_export_cpu_optimization.md`](onnx_export_cpu_optimization.md) (`fast` / `fp32` presets, seed 42).
+
 ## Summary
 
 On the same fixed inputs (built-in sampling defaults, text via CLI), **Rust ONNX inference is faster than upstream PyTorch** for both v2Pro and v2ProPlus when reference audio is cached (typical chat / multi-utterance use).

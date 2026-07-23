@@ -212,6 +212,7 @@ class TextEncoder(nn.Module):
 
         text_mask = torch.unsqueeze(commons.sequence_mask(text_lengths, text.size(1)), 1).to(y.dtype)
 
+        # Embedding is [B,T,C]; encoder_text is Conv1d-native [B,C,T] so this Transpose stays.
         text = self.text_embedding(text).transpose(1, 2)
         text = self.encoder_text(text * text_mask, text_mask)
         y = self.mrte(y, y_mask, text, text_mask, ge)

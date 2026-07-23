@@ -10,3 +10,5 @@ MNN*
 onnx_build/
 gpt-sovits-upstream/
 scripts/reports/
+/models/
+target/vits_profile/

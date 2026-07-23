@@ -39,6 +39,8 @@ pub struct TextProcessor {
     pub g2pw: G2PW,
     pub g2p_en: G2pEn,
     pub bert: BertModel,
+    /// When true, a failed chunk aborts preprocessing instead of warn-and-skip.
+    pub fail_on_chunk_error: bool,
 }
 
 impl TextProcessor {
@@ -48,6 +50,7 @@ impl TextProcessor {
             g2pw,
             g2p_en,
             bert,
+            fail_on_chunk_error: false,
         })
     }
 
@@ -72,7 +75,12 @@ impl TextProcessor {
             match self.process_chunk(&cleaned, &chunk, lang_id, false) {
                 Ok(Some(output)) => result.push((output.norm_text, output.phone_ids, output.bert)),
                 Ok(None) => {}
-                Err(e) => warn!("Failed to process chunk '{}': {}", chunk, e),
+                Err(e) => {
+                    if self.fail_on_chunk_error {
+                        return Err(anyhow::anyhow!("failed to process chunk '{}': {}", chunk, e));
+                    }
+                    warn!("Failed to process chunk '{}': {}", chunk, e);
+                }
             }
         }
 

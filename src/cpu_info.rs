@@ -1,9 +1,9 @@
-use std::fs;
 use std::io;
 
 pub fn get_hw_cpu_ids_and_freqs() -> io::Result<Vec<(usize, u64)>> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        use std::fs;
         let mut cpu_info: Vec<(usize, u64)> = Vec::new();
         let mut seen_siblings: Vec<String> = Vec::new();
         let cpu_dir = "/sys/devices/system/cpu/";
@@ -87,10 +87,29 @@ pub fn get_hw_big_cores() -> io::Result<Vec<(usize, u64)>> {
 
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
-        // Non-Linux platforms: frequency is 0, cannot reliably identify big cores
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            "Cannot identify big cores on non-Linux platforms due to missing frequency data",
-        ))
+        // Non-Linux: no reliable big-core freq data — use all logical cores.
+        Ok(cpu_info)
+    }
+}
+
+/// Default ORT intra-op thread count for this host.
+pub fn default_intra_threads() -> usize {
+    let n = get_hw_big_cores()
+        .map(|cores| cores.len().max(1))
+        .unwrap_or_else(|_| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        });
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // Big-core list is already filtered by frequency on Linux/Android.
+        n.clamp(1, 8)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        // macOS/Windows: available_parallelism includes E-cores. Prefer ~P-core
+        // count (half of logical) capped at 8 to avoid oversubscription.
+        ((n + 1) / 2).clamp(2, 8)
     }
 }

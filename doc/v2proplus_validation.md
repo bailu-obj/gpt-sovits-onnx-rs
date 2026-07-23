@@ -1,6 +1,6 @@
 # v2ProPlus Run Validation
 
-Validated on 2026-07-09 (macOS).
+Validated on 2026-07-09 (macOS). Export / artifact / Rust load path still apply; use `--precision fp32` when comparing tokens/waveforms to PyTorch.
 
 ## Conclusion
 
@@ -10,7 +10,8 @@ Validated on 2026-07-09 (macOS).
 
 ```bash
 ./scripts/export/04_download_models.sh --version v2ProPlus
-./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --no-quant
+# fp32: avoid INT8 T2S logit drift when checking parity vs Python
+./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --precision fp32
 
 ./scripts/export/validate_bundle.sh \
   --bundle-dir gpt-sovits-upstream/onnx-patched/custom_v2proplus \
@@ -22,13 +23,15 @@ RUST_LOG=Debug cargo run --release --example gpt_sovits_demo -- \
   --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
 ```
 
+For shipping CPU latency, re-export with `--precision fast` instead (default).
+
 ## Export Results
 
 - Output directory: `gpt-sovits-upstream/onnx-patched/custom_v2proplus/`
 - Metadata (`gpt-sovits-upstream/onnx/custom_v2proplus.json`):
   - `Version`: `v2ProPlus`
   - `IsV2Pro`: `true`
-- Required artifacts present: `ssl.onnx`, `bert.onnx`, `sv.onnx`, `g2pW.onnx`, `g2p_en/`, `{prefix}_t2s_*.onnx`, `{prefix}_vits.onnx`
+- Required artifacts present: `ssl.onnx`, `bert.onnx`, `sv.onnx`, `g2pW.onnx`, `g2p_en/`, `{prefix}_t2s_*.onnx`, `{prefix}_vits.onnx` (and optional `{prefix}_vits_ref.onnx` / `{prefix}_vits_decode.onnx` when split is enabled)
 - VITS inputs: `text_seq`, `pred_semantic`, `ref_audio`, `sv_emb`
 
 ## Inference Results
@@ -36,7 +39,8 @@ RUST_LOG=Debug cargo run --release --example gpt_sovits_demo -- \
 - Demo loaded `sv.onnx` automatically
 - Logged `SV embedding shape: [1, 20480]`
 - Generated `output.wav` (mono 32000 Hz)
-- Synchronous inference: ~1447 ms on validation machine
+
+Latency for the current layout + precision matrix is tracked in [`onnx_export_cpu_optimization.md`](onnx_export_cpu_optimization.md), not as a one-shot sync number here.
 
 ## Audio Quality Parity (2026-07-09)
 

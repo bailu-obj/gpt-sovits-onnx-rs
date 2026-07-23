@@ -13,7 +13,7 @@ use gpt_sovits_onnx_rs::{
 };
 use jieba_rs::Jieba;
 use serde::Deserialize;
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::{Path, PathBuf}};
 
 #[derive(Debug, Deserialize)]
 struct CorpusItem {
@@ -133,6 +133,56 @@ fn preprocess_word2ph_alignment_mandarin() {
     let w2p_sum: i32 = result.word2ph.iter().sum();
     assert_eq!(w2p_sum as usize, phone_count);
     assert_eq!(result.word2ph.len(), result.norm_text.chars().count());
+}
+
+#[test]
+fn preprocess_g2pw_batch_matches_single_dict_fallback() {
+    let mut g2pw = G2PW::new(None::<&str>).unwrap();
+    let texts = ["银行行长", "银行行长", "你好世界"];
+    let batch = g2pw.g2p_batch(&texts);
+    assert_eq!(batch.len(), texts.len());
+    for (i, t) in texts.iter().enumerate() {
+        let single = g2pw
+            .simple_get_pinyin(t)
+            .into_iter()
+            .map(|o| match o {
+                gpt_sovits_onnx_rs::zh::g2pw::G2PWOut::Pinyin(p)
+                | gpt_sovits_onnx_rs::zh::g2pw::G2PWOut::Yue(p) => p,
+                gpt_sovits_onnx_rs::zh::g2pw::G2PWOut::RawChar(c) => c.to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batch[i], single, "mismatch for '{}'", t);
+    }
+}
+
+#[test]
+fn preprocess_g2pw_onnx_batch_is_deterministic() {
+    let path = env::var("G2PW_ONNX_PATH")
+        .ok()
+        .or_else(|| {
+            let candidates = [
+                "models/gpt-sovits-onnx-custom/quant/g2pW.onnx",
+                "models/gpt-sovits-onnx-custom/unquant/g2pW.onnx",
+            ];
+            candidates
+                .into_iter()
+                .find(|p| Path::new(p).is_file())
+                .map(|p| p.to_string())
+        });
+    let Some(path) = path else {
+        eprintln!("skipping G2PW ONNX batch test: no g2pW.onnx found");
+        return;
+    };
+    let mut g2pw = G2PW::new(Some(Path::new(&path))).expect("load g2pW.onnx");
+    let texts = ["银行行长吃饭了", "你好世界"];
+    let a = g2pw.g2p_batch(&texts);
+    let b = g2pw.g2p_batch(&texts);
+    assert_eq!(a, b, "batched G2PW should be deterministic");
+    assert_eq!(a.len(), texts.len());
+    for outs in &a {
+        assert!(!outs.is_empty());
+        assert!(outs.iter().all(|s| !s.is_empty()), "empty pinyin slot");
+    }
 }
 
 #[test]

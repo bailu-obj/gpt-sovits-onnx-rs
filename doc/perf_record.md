@@ -1,6 +1,8 @@
-# Perf Record
+# Perf Record (historical)
 
-> **2026-07-09:** PyTorch vs Rust ONNX CPU speed (v2Pro / v2ProPlus) → [`pytorch_vs_onnx_speed.md`](pytorch_vs_onnx_speed.md)
+> **Historical** PC (Ryzen WSL) / Mobile (Snapdragon) optimization ladder from 2025–mid‑2026.  
+> **Current** Apple Silicon layout + precision-preset numbers → [`onnx_export_cpu_optimization.md`](onnx_export_cpu_optimization.md).  
+> **2026-07-09** PyTorch vs Rust (different corpus/bundles) → [`pytorch_vs_onnx_speed.md`](pytorch_vs_onnx_speed.md)
 
 * **Input**: 你好呀，我们是一群追逐梦想的人！
 * **Output WAV Time**: 3s

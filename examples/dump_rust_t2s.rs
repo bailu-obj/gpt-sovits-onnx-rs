@@ -40,8 +40,10 @@ fn main() -> Result<(), GSVError> {
     let args = Args::parse();
     let _infer = resolve_infer_params(&args)?;
     let prefix = find_model_prefix(&args.model_path)?;
+    let vits_path = args.model_path.join(format!("{prefix}_vits.onnx"));
+    let sv_path = args.model_path.join("sv.onnx");
     let mut model = TTSModel::new(
-        args.model_path.join(format!("{prefix}_vits.onnx")),
+        vits_path.clone(),
         args.model_path.join("ssl.onnx"),
         args.model_path.join(format!("{prefix}_t2s_encoder.onnx")),
         args.model_path
@@ -50,8 +52,9 @@ fn main() -> Result<(), GSVError> {
         Some(args.model_path.join("bert.onnx")),
         Some(args.model_path.join("g2pW.onnx")),
         None,
-        Some(args.model_path.join("sv.onnx")),
+        if sv_path.exists() { Some(sv_path) } else { None },
     )?;
+    let _ = model.try_load_split_vits_beside(&vits_path)?;
     model.process_reference_sync(
         args.model_path.join("ref.wav"),
         &args.ref_text,

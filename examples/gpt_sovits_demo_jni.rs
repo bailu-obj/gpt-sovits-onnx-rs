@@ -42,6 +42,13 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_initModel
     sv_path: JString,
 ) -> jlong {
     init_logging();
+    // Prefer low-power ORT profile on Android (shared pool, no spinning).
+    configure_ort_runtime(OrtConfig {
+        profile: OrtRuntimeProfile::LowPower,
+        intra_threads: None,
+        use_xnnpack: cfg!(feature = "xnnpack"),
+        shared_thread_pool: Some(true),
+    });
     // Convert JString to Rust String with error handling
     let g2p_w: String = match env.get_string(&g2p_w_path) {
         Ok(s) => s.into(),
@@ -159,7 +166,10 @@ pub extern "system" fn Java_com_example_gpt_1sovits_1demo_MainActivity_initModel
         Some(Path::new(&g2p_en)),
         sv.as_deref().map(Path::new),
     ) {
-        Ok(model) => Box::into_raw(Box::new(model)) as jlong,
+        Ok(mut model) => {
+            let _ = model.try_load_split_vits_beside(Path::new(&vits));
+            Box::into_raw(Box::new(model)) as jlong
+        }
         Err(e) => {
             env.throw_new(
                 "java/lang/RuntimeException",

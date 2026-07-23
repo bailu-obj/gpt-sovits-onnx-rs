@@ -158,7 +158,7 @@ class MultiheadAttention(Module):
         q, k, v = F.linear(query, self.in_proj_weight,
                          self.in_proj_bias).chunk(3, dim=-1)
 
-        # Update key and value with cache
+        # Seq-major KV cache [B,T,H*D] — contiguous time-prefix for ORT (best measured CPU path).
         if k_cache is not None and v_cache is not None and not first_infer:
             k_cache = torch.cat([k_cache, k], dim=1)
             v_cache = torch.cat([v_cache, v], dim=1)

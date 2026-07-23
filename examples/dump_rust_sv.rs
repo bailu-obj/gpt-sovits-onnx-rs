@@ -24,8 +24,9 @@ fn find_model_prefix(assets_dir: &PathBuf) -> Result<String, GSVError> {
 fn main() -> Result<(), GSVError> {
     let args = Args::parse();
     let prefix = find_model_prefix(&args.model_path)?;
+    let vits_path = args.model_path.join(format!("{prefix}_vits.onnx"));
     let mut model = TTSModel::new(
-        args.model_path.join(format!("{prefix}_vits.onnx")),
+        vits_path.clone(),
         args.model_path.join("ssl.onnx"),
         args.model_path.join(format!("{prefix}_t2s_encoder.onnx")),
         args.model_path
@@ -36,6 +37,7 @@ fn main() -> Result<(), GSVError> {
         None,
         Some(args.model_path.join("sv.onnx")),
     )?;
+    let _ = model.try_load_split_vits_beside(&vits_path)?;
     model.process_reference_sync(
         args.model_path.join("ref.wav"),
         &args.ref_text,

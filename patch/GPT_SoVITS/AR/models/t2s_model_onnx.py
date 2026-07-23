@@ -116,7 +116,8 @@ class T2SFirstStageDecoder(nn.Module):
 
     def forward(self, x, prompt, bert_feature):
         x = self.ar_text_embedding(x)
-        x = x + self.bert_proj(bert_feature.transpose(1, 2))
+        # Native layout: bert_feature is [B, T, 1024] (no Transpose before Linear).
+        x = x + self.bert_proj(bert_feature)
         x = self.ar_text_position(x)
 
         y = prompt
@@ -170,6 +171,33 @@ class T2SStageDecoder(nn.Module):
         logits = self.ar_predict_layer(xy_dec[:, -1])
 
         return logits[0], k_cache, v_cache
+
+
+class T2SStageDecoderDeltaKV(nn.Module):
+    """Stage decoder that returns only the newly appended K/V row per layer.
+
+    Host runtimes append the delta into an external workspace, avoiding full-cache
+    ORT→host copies each AR step. Internal attention still concatenates for SDPA.
+    """
+
+    def __init__(self, stage_decoder: T2SStageDecoder):
+        super().__init__()
+        self.stage_decoder = stage_decoder
+        self.num_layers = stage_decoder.num_layers
+
+    def forward(self, y, k_cache, v_cache, y_len, idx):
+        logits, k_cache, v_cache = self.stage_decoder(y, k_cache, v_cache, y_len, idx)
+        # Head-major [B,H,T,D] uses time on dim 2; legacy [B,T,H*D] uses dim 1.
+        k_delta = []
+        v_delta = []
+        for k, v in zip(k_cache, v_cache):
+            if k.dim() == 4:
+                k_delta.append(k[:, :, -1:, :])
+                v_delta.append(v[:, :, -1:, :])
+            else:
+                k_delta.append(k[:, -1:, ...])
+                v_delta.append(v[:, -1:, ...])
+        return logits, k_delta, v_delta
 
 class Text2SemanticDecoder(nn.Module):
     def __init__(self, config, norm_first=False):

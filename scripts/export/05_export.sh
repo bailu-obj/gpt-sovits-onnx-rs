@@ -7,25 +7,35 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 VERSION=""
 EXPORT_NAME=""
-NO_QUANT=true
+PRECISION="fast"
 OUTPUT_DIR=""
 SMOKE_TEST=false
+SPLIT_VITS_REF=true
 
 usage() {
     cat <<'EOF'
 Usage: 05_export.sh --version V --export-name NAME [options]
 
 Export ONNX models and run optimize_aio post-processing.
+Default precision: fast (INT8 T2S + INT4 BERT/g2pW; VITS FP32 slim).
 
 Options:
   --version VERSION       Required: v2, v2Pro, or v2ProPlus
   --export-name NAME      Required: output bundle name (e.g. custom)
   --gpt-sovits-dir PATH   Upstream clone path
   --output-dir PATH       Copy/symlink final bundle here (optional)
-  --no-quant              Disable INT8 quantization (default)
-  --quant                 Enable INT8 quantization
+  --precision PRESET      fp32 | fp16 | quality | fast (default: fast)
+                          fp16 = selective VITS native FP16 I/O (BERT/T2S FP32)
+  --split-vits-ref        Also export {name}_vits_ref.onnx + {name}_vits_decode.onnx (default)
+  --no-split-vits-ref     Export monolithic VITS only
   --smoke-test            Run cargo gpt_sovits_demo after export (needs ref.wav)
   -h, --help              Show this help
+
+Precision presets:
+  fp32     optimize/slim only (parity / debug)
+  fp16     selective FP16 on VITS (native FP16 I/O); BERT/T2S stay FP32
+  quality  INT4 BERT/g2pW; T2S stays FP32
+  fast     INT4 BERT/g2pW + INT8 T2S (best measured CPU latency)
 EOF
 }
 
@@ -47,16 +57,20 @@ while [[ $# -gt 0 ]]; do
         OUTPUT_DIR="$2"
         shift 2
         ;;
-    --no-quant)
-        NO_QUANT=true
-        shift
-        ;;
-    --quant)
-        NO_QUANT=false
-        shift
+    --precision)
+        PRECISION="$2"
+        shift 2
         ;;
     --smoke-test)
         SMOKE_TEST=true
+        shift
+        ;;
+    --split-vits-ref)
+        SPLIT_VITS_REF=true
+        shift
+        ;;
+    --no-split-vits-ref)
+        SPLIT_VITS_REF=false
         shift
         ;;
     -h | --help)
@@ -71,6 +85,12 @@ done
 
 [[ -n "${VERSION}" ]] || die "--version is required"
 [[ -n "${EXPORT_NAME}" ]] || die "--export-name is required"
+case "${PRECISION}" in
+fp32 | fp16 | quality | fast) ;;
+*)
+    die "Invalid --precision '${PRECISION}' (expected: fp32|fp16|quality|fast)"
+    ;;
+esac
 
 require_macos
 init_paths
@@ -88,10 +108,16 @@ PATCHED_DIR="${GPT_SOVITS_ROOT}/onnx-patched/${EXPORT_NAME}"
 log_info "Exporting ONNX (${VERSION} -> ${EXPORT_NAME})"
 (
     cd "${GPT_SOVITS_ROOT}"
-    run_python GPT_SoVITS/export_onnx_v2.py \
-        --model_path "./models/export/${VERSION}" \
-        --export_name "${EXPORT_NAME}" \
+    EXPORT_ARGS=(
+        --model_path "./models/export/${VERSION}"
+        --export_name "${EXPORT_NAME}"
         --version "${VERSION}"
+    )
+    if $SPLIT_VITS_REF; then
+        EXPORT_ARGS+=(--split-vits-ref)
+        log_info "Split VITS ref/decode export enabled"
+    fi
+    run_python GPT_SoVITS/export_onnx_v2.py "${EXPORT_ARGS[@]}"
 )
 
 G2PW_ONNX="${GPT_SOVITS_ROOT}/GPT_SoVITS/text/G2PWModel/g2pW.onnx"
@@ -104,16 +130,18 @@ G2P_EN_SRC="${GPT_SOVITS_ROOT}/models/g2p_en"
 mkdir -p "${RAW_DIR}/g2p_en"
 cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${RAW_DIR}/g2p_en/"
 
-OPT_ARGS=(--input-dir "${RAW_DIR}" --output-dir "${PATCHED_DIR}")
-if $NO_QUANT; then
-    OPT_ARGS+=(--no-quant)
+log_info "Running optimize_aio.py --precision ${PRECISION}"
+run_python "${ONNX_RS_ROOT}/scripts/optimize_aio.py" \
+    --input-dir "${RAW_DIR}" \
+    --output-dir "${PATCHED_DIR}" \
+    --precision "${PRECISION}"
+
+# g2p_en is processed by optimize_aio when present under input-dir/g2p_en/.
+# If that folder was empty for some reason, fall back to a raw copy.
+if [[ ! -f "${PATCHED_DIR}/g2p_en/encoder_model.onnx" ]]; then
+    mkdir -p "${PATCHED_DIR}/g2p_en"
+    cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${PATCHED_DIR}/g2p_en/"
 fi
-
-log_info "Running optimize_aio.py"
-run_python "${ONNX_RS_ROOT}/scripts/optimize_aio.py" "${OPT_ARGS[@]}"
-
-mkdir -p "${PATCHED_DIR}/g2p_en"
-cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${PATCHED_DIR}/g2p_en/"
 
 if [[ -n "${OUTPUT_DIR}" ]]; then
     mkdir -p "${OUTPUT_DIR}"

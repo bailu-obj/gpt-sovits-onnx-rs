@@ -1,6 +1,5 @@
 use hound::Error as HoundError;
 use ndarray::ShapeError;
-use ort::Error as OrtError;
 use std::{
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
@@ -10,13 +9,15 @@ use std::{
 #[derive(Debug)]
 pub enum GSVError {
     Io(IoError),
-    Ort(OrtError),
+    Ort(String),
     Shape(ShapeError),
     SystemTime(SystemTimeError),
     Hound(HoundError),
     AnyHow(anyhow::Error),
     Common(String),
     FileNotFound(String),
+    /// Cooperative cancellation requested by the caller.
+    Cancelled,
 }
 
 impl Error for GSVError {}
@@ -33,13 +34,14 @@ impl Display for GSVError {
             Self::AnyHow(e) => Display::fmt(e, f),
             Self::Common(e) => Display::fmt(e, f),
             Self::FileNotFound(e) => Display::fmt(e, f),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
 
-impl From<OrtError> for GSVError {
-    fn from(value: OrtError) -> Self {
-        Self::Ort(value)
+impl<R> From<ort::Error<R>> for GSVError {
+    fn from(value: ort::Error<R>) -> Self {
+        Self::Ort(value.to_string())
     }
 }
 

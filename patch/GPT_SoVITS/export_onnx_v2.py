@@ -9,6 +9,7 @@ import soundfile
 import os
 import json
 from transformers import AutoModelForMaskedLM, AutoTokenizer
+from module import commons
 from module.models_onnx import SynthesizerTrn, symbols_v1, symbols_v2
 from AR.models.t2s_lightning_module_onnx import Text2SemanticLightningModule
 import argparse
@@ -21,6 +22,17 @@ import kaldi as Kaldi
 from process_ckpt import get_sovits_version_from_path_fast
 
 V2PRO_SET = {"v2Pro", "v2ProPlus"}
+
+# Optional batched T2S ONNX export (off by default).
+# Set GSV_EXPORT_T2S_BATCH=1 to add dynamic batch axis 0 on stage-decoder I/O.
+# Requires a matching batched Rust ORT path — not enabled in gpt-sovits-onnx-rs yet.
+_EXPORT_T2S_BATCH = os.environ.get("GSV_EXPORT_T2S_BATCH", "0") == "1"
+# Export stage-decoder K/V as single-row deltas (default on). Set GSV_EXPORT_KV_DELTA=0
+# to emit full caches for older runtimes.
+_EXPORT_KV_DELTA = os.environ.get("GSV_EXPORT_KV_DELTA", "1") == "1"
+# FS decoder BERT layout: native [B,T,1024] by default. Set GSV_EXPORT_BERT_BFT=1 for
+# legacy [B,1024,T] (requires transpose inside the graph).
+_EXPORT_BERT_BFT = os.environ.get("GSV_EXPORT_BERT_BFT", "0") == "1"
 
 # PyTorch 2.6+ defaults to dynamo/torch.export ONNX; GPT-SoVITS needs legacy export.
 _LEGACY_ONNX_KWARGS = {"dynamo": False}
@@ -133,8 +145,10 @@ class T2SModel(nn.Module):
     def forward(self, ref_seq, text_seq, ref_bert, text_bert, ssl_content):
         early_stop_num = torch.LongTensor([self.hz * self.max_sec])
         prompts = self.onnx_encoder(ssl_content)
-        bert = torch.cat([ref_bert.transpose(0, 1), text_bert.transpose(0, 1)], 1)
-        bert = bert.unsqueeze(0)
+        if _EXPORT_BERT_BFT:
+            bert = torch.cat([ref_bert.transpose(0, 1), text_bert.transpose(0, 1)], 1).unsqueeze(0)
+        else:
+            bert = torch.cat([ref_bert, text_bert], 0).unsqueeze(0)
         x = torch.cat([ref_seq, text_seq], 1)
         y_len = prompts.shape[1]
         prefix_len = prompts.shape[1]
@@ -172,17 +186,82 @@ class T2SModel(nn.Module):
         
         prompts = self.onnx_encoder(ssl_content)
 
-        bert = torch.cat([ref_bert.transpose(0, 1), text_bert.transpose(0, 1)], 1)
-        bert = bert.unsqueeze(0)
+        if _EXPORT_BERT_BFT:
+            # Legacy [B, 1024, T] — FS module temporarily uses transpose path.
+            bert = torch.cat([ref_bert.transpose(0, 1), text_bert.transpose(0, 1)], 1).unsqueeze(0)
+            print("GSV_EXPORT_BERT_BFT=1: FS decoder bert layout [B,1024,T] (legacy)")
+            fs_bert_axis = {2: "bert_length"}
+        else:
+            bert = torch.cat([ref_bert, text_bert], 0).unsqueeze(0)
+            print("FS decoder bert layout [B,T,1024] (native, no graph Transpose)")
+            fs_bert_axis = {1: "bert_length"}
         x = torch.cat([ref_seq, text_seq], 1)
         y_len = prompts.shape[1]
 
-
         num_layers = self.t2s_model.num_layers
-        k_cache = [torch.zeros((1, 0, 1, 512), dtype=x.dtype, device=x.device) for _ in range(num_layers)]
-        v_cache = [torch.zeros((1, 0, 1, 512), dtype=x.dtype, device=x.device) for _ in range(num_layers)]
+        # Seq-major [B, T, H*D] — contiguous time-prefix views for ORT (best measured CPU path).
+        hidden = self.t2s_model.model_dim
+        k_cache = [
+            torch.zeros((1, 0, hidden), dtype=x.dtype, device=x.device)
+            for _ in range(num_layers)
+        ]
+        v_cache = [
+            torch.zeros((1, 0, hidden), dtype=x.dtype, device=x.device)
+            for _ in range(num_layers)
+        ]
 
-        # Export first stage decoder
+        fs_dynamic_axes = {
+            "x": {1: "x_length"},
+            "prompts": {1: "prompts_length"},
+            "bert": fs_bert_axis,
+        }
+        if _EXPORT_T2S_BATCH:
+            fs_dynamic_axes["x"][0] = "batch"
+            fs_dynamic_axes["bert"][0] = "batch"
+            print("GSV_EXPORT_T2S_BATCH=1: exporting FS decoder with dynamic batch axis 0")
+
+        if _EXPORT_BERT_BFT:
+            # Temporarily restore transpose inside FS for legacy A/B exports.
+            _fs = self.first_stage_decoder
+            _orig_forward = _fs.forward
+
+            def _legacy_forward(x_in, prompt, bert_feature, _mod=_fs):
+                x_emb = _mod.ar_text_embedding(x_in)
+                x_emb = x_emb + _mod.bert_proj(bert_feature.transpose(1, 2))
+                x_emb = _mod.ar_text_position(x_emb)
+                y = prompt
+                x_len = x_emb.shape[1]
+                y_emb = _mod.ar_audio_embedding(y)
+                y_pos = _mod.ar_audio_position(y_emb)
+                xy_pos = torch.concat([x_emb, y_pos], dim=1)
+                y_len_local = y_emb.shape[1]
+                x_attn_mask_pad = F.pad(
+                    torch.zeros((x_len, x_len), dtype=torch.bool),
+                    (0, y_len_local),
+                    value=True,
+                )
+                y_attn_mask = F.pad(
+                    torch.triu(
+                        torch.ones(y_len_local, y_len_local, dtype=torch.bool), diagonal=1
+                    ),
+                    (x_len, 0),
+                    value=False,
+                )
+                src_len = x_len + y_len_local
+                xy_attn_mask = (
+                    torch.concat([x_attn_mask_pad, y_attn_mask], dim=0)
+                    .unsqueeze(0)
+                    .expand(_mod.num_head, -1, -1)
+                    .view(1, _mod.num_head, src_len, src_len)
+                )
+                xy_dec, k_c, v_c = _mod.h(
+                    xy_pos, mask=xy_attn_mask, k_cache=None, v_cache=None, first_infer=True
+                )
+                logits_out = _mod.ar_predict_layer(xy_dec[:, -1])
+                return logits_out[0], k_c, v_c
+
+            _fs.forward = _legacy_forward  # type: ignore[method-assign]
+
         torch.onnx.export(
             self.first_stage_decoder,
             (x, prompts, bert),
@@ -190,33 +269,48 @@ class T2SModel(nn.Module):
             input_names=["x", "prompts", "bert"],
             output_names=["logits"] + [f"k_cache_{i}" for i in range(num_layers)] + 
                          [f"v_cache_{i}" for i in range(num_layers)],
-            dynamic_axes={
-                "x": {1: "x_length"},
-                "prompts": {1: "prompts_length"},
-                "bert": {2: "bert_length"},
-            },
+            dynamic_axes=fs_dynamic_axes,
             verbose=False,
             opset_version=20,
             **_LEGACY_ONNX_KWARGS,
         )
         logits, k_cache, v_cache  = self.first_stage_decoder(x, prompts, bert)
+        if _EXPORT_BERT_BFT:
+            self.first_stage_decoder.forward = _orig_forward  # type: ignore[method-assign]
+
         samples = sample(logits, prompts,top_k=15, top_p = 1.0, temperature=1.0)[0].unsqueeze(0)
         y = torch.concat([prompts, samples], dim=1)
         idx = 0
-        # Export stage decoder
+        s_decoder_dynamic_axes = {
+            "iy": {1: "iy_length"},
+            **{f"ik_cache_{i}": {1: "kv_length"} for i in range(num_layers)},
+            **{f"iv_cache_{i}": {1: "kv_length"} for i in range(num_layers)},
+        }
+        if _EXPORT_T2S_BATCH:
+            s_decoder_dynamic_axes["iy"][0] = "batch"
+            for i in range(num_layers):
+                s_decoder_dynamic_axes[f"ik_cache_{i}"][0] = "batch"
+                s_decoder_dynamic_axes[f"iv_cache_{i}"][0] = "batch"
+            print("GSV_EXPORT_T2S_BATCH=1: exporting stage decoder with dynamic batch axis 0")
+
+        from AR.models.t2s_model_onnx import T2SStageDecoderDeltaKV
+
+        if _EXPORT_KV_DELTA:
+            s_export_mod = T2SStageDecoderDeltaKV(self.stage_decoder)
+            print("GSV_EXPORT_KV_DELTA=1: stage decoder emits single-row K/V deltas")
+        else:
+            s_export_mod = self.stage_decoder
+            print("GSV_EXPORT_KV_DELTA=0: stage decoder emits full K/V caches")
+
         torch.onnx.export(
-            self.stage_decoder,
+            s_export_mod,
             (y, k_cache, v_cache, y_len, idx),
             f"onnx/{project_name}/{project_name}_t2s_s_decoder.onnx",
             input_names=["iy"] + [f"ik_cache_{i}" for i in range(num_layers)] + 
                         [f"iv_cache_{i}" for i in range(num_layers)] + ["y_len", "idx"],
             output_names=["logits"] + [f"k_cache_{i}" for i in range(num_layers)] + 
                          [f"v_cache_{i}" for i in range(num_layers)],
-            dynamic_axes={
-                "iy": {1: "iy_length"},
-                **{f"ik_cache_{i}": {1: "kv_length"} for i in range(num_layers)},
-                **{f"iv_cache_{i}": {1: "kv_length"} for i in range(num_layers)},
-            },
+            dynamic_axes=s_decoder_dynamic_axes,
             verbose=False,
             opset_version=20,
             **_LEGACY_ONNX_KWARGS,
@@ -244,6 +338,7 @@ class VitsModel(nn.Module):
         self.vq_model.eval()
         self.vq_model.load_state_dict(dict_s2["weight"], strict=False)
         self.vq_model.dec.remove_weight_norm()
+        self.version = version
         
     def forward(self, text_seq, pred_semantic, ref_audio, sv_emb=None):
         refer = spectrogram_torch(
@@ -254,6 +349,142 @@ class VitsModel(nn.Module):
             center=False
         )
         return self.vq_model(pred_semantic, text_seq, refer, sv_emb=sv_emb)[0]
+
+
+class VitsRefEncoder(nn.Module):
+    """Reference path only: ref_audio (+ optional sv_emb) -> ge style tensor."""
+
+    def __init__(self, vits: VitsModel):
+        super().__init__()
+        self.vq_model = vits.vq_model
+        self.hps = vits.hps
+        self.version = vits.version
+
+    def forward(self, ref_audio, sv_emb=None):
+        refer = spectrogram_torch(
+            ref_audio,
+            self.hps.data.filter_length,
+            self.hps.data.hop_length,
+            self.hps.data.win_length,
+            center=False,
+        )
+        refer_lengths = torch.LongTensor([refer.size(2)]).to(refer.device)
+        refer_mask = torch.unsqueeze(
+            commons.sequence_mask(refer_lengths, refer.size(2)), 1
+        ).to(refer.dtype)
+        if self.vq_model.version == "v1":
+            ge = self.vq_model.ref_enc(refer * refer_mask, refer_mask)
+        else:
+            ge = self.vq_model.ref_enc(refer[:, :704] * refer_mask, refer_mask)
+        if self.vq_model.is_v2pro:
+            sv_emb = self.vq_model.sv_emb(sv_emb)
+            ge = ge + sv_emb.unsqueeze(-1)
+            ge = self.vq_model.prelu(ge)
+        return ge
+
+
+class VitsDecode(nn.Module):
+    """Decode path with cached ge: text + pred_semantic + controls -> waveform."""
+
+    def __init__(self, vits: VitsModel):
+        super().__init__()
+        self.vq_model = vits.vq_model
+
+    def forward(self, text_seq, pred_semantic, ge, noise_scale, speed):
+        quantized = self.vq_model.quantizer.decode(pred_semantic)
+        if self.vq_model.semantic_frame_rate == "25hz":
+            quantized = F.interpolate(quantized, scale_factor=2.0, mode="nearest")
+
+        y_lengths = torch.LongTensor([quantized.size(2)]).to(pred_semantic.device)
+        text_lengths = torch.LongTensor([text_seq.size(1)]).to(pred_semantic.device)
+        noise_scale = noise_scale[0]
+        speed_scalar = speed[0]
+
+        if self.vq_model.is_v2pro:
+            ge_ = self.vq_model.ge_to512(ge.transpose(2, 1)).transpose(2, 1)
+            x, m_p, logs_p, y_mask = self.vq_model.enc_p(
+                quantized, y_lengths, text_seq, text_lengths, ge_, speed_scalar
+            )
+        else:
+            x, m_p, logs_p, y_mask = self.vq_model.enc_p(
+                quantized, y_lengths, text_seq, text_lengths, ge, speed_scalar
+            )
+
+        z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
+        z = self.vq_model.flow(z_p, y_mask, g=ge, reverse=True)
+        o = self.vq_model.dec((z * y_mask)[:, :, :], g=ge)
+        # Keep `speed` as an explicit graph input for runtime control pipelines.
+        return o[:, 0, :] + speed.reshape(1, 1) * 1e-7
+
+
+def export_split_vits(vits, text_seq, pred_semantic, ref_audio, project_name, sv_emb=None):
+    """Export optional split VITS graphs (ref + decode). Off by default; see --split-vits-ref."""
+    ref_encoder = VitsRefEncoder(vits)
+    decode = VitsDecode(vits)
+    is_pro = is_v2pro(vits.version)
+
+    noise_scale = torch.tensor([0.5], dtype=torch.float32, device=pred_semantic.device)
+    speed = torch.tensor([1.0], dtype=torch.float32, device=pred_semantic.device)
+
+    if is_pro:
+        torch.onnx.export(
+            ref_encoder,
+            (ref_audio, sv_emb),
+            f"onnx/{project_name}/{project_name}_vits_ref.onnx",
+            input_names=["ref_audio", "sv_emb"],
+            output_names=["ge"],
+            dynamic_axes={
+                "ref_audio": {1: "audio_length"},
+            },
+            opset_version=20,
+            verbose=False,
+            **_LEGACY_ONNX_KWARGS,
+        )
+        ge = ref_encoder(ref_audio, sv_emb)
+        torch.onnx.export(
+            decode,
+            (text_seq, pred_semantic, ge, noise_scale, speed),
+            f"onnx/{project_name}/{project_name}_vits_decode.onnx",
+            input_names=["text_seq", "pred_semantic", "ge", "noise_scale", "speed"],
+            output_names=["audio"],
+            dynamic_axes={
+                "text_seq": {1: "text_length"},
+                "pred_semantic": {2: "pred_length"},
+            },
+            opset_version=20,
+            verbose=False,
+            **_LEGACY_ONNX_KWARGS,
+        )
+    else:
+        torch.onnx.export(
+            ref_encoder,
+            (ref_audio,),
+            f"onnx/{project_name}/{project_name}_vits_ref.onnx",
+            input_names=["ref_audio"],
+            output_names=["ge"],
+            dynamic_axes={
+                "ref_audio": {1: "audio_length"},
+            },
+            opset_version=20,
+            verbose=False,
+            **_LEGACY_ONNX_KWARGS,
+        )
+        ge = ref_encoder(ref_audio)
+        torch.onnx.export(
+            decode,
+            (text_seq, pred_semantic, ge, noise_scale, speed),
+            f"onnx/{project_name}/{project_name}_vits_decode.onnx",
+            input_names=["text_seq", "pred_semantic", "ge", "noise_scale", "speed"],
+            output_names=["audio"],
+            dynamic_axes={
+                "text_seq": {1: "text_length"},
+                "pred_semantic": {2: "pred_length"},
+            },
+            opset_version=20,
+            verbose=False,
+            **_LEGACY_ONNX_KWARGS,
+        )
+    print(f"#### exported split VITS: {project_name}_vits_ref.onnx + {project_name}_vits_decode.onnx ####")
 
 class GptSoVits(nn.Module):
     def __init__(self, vits, t2s, sv_model=None, version="v2"):
@@ -273,7 +504,17 @@ class GptSoVits(nn.Module):
         else:
             return self.vits(text_seq, pred_semantic, ref_audio)
 
-    def export(self, ref_seq, text_seq, ref_bert, text_bert, ref_audio, ssl_content, project_name):
+    def export(
+        self,
+        ref_seq,
+        text_seq,
+        ref_bert,
+        text_bert,
+        ref_audio,
+        ssl_content,
+        project_name,
+        split_vits_ref=False,
+    ):
         self.t2s.export(ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name)
         pred_semantic = self.t2s(ref_seq, text_seq, ref_bert, text_bert, ssl_content)
         if is_v2pro(self.version):
@@ -325,6 +566,16 @@ class GptSoVits(nn.Module):
                 opset_version=20,
                 verbose=False,
                 **_LEGACY_ONNX_KWARGS,
+            )
+
+        if split_vits_ref:
+            export_split_vits(
+                self.vits,
+                text_seq,
+                pred_semantic,
+                ref_audio,
+                project_name,
+                sv_emb=sv_emb if is_v2pro(self.version) else None,
             )
 
 class SSLModel(nn.Module):
@@ -387,9 +638,8 @@ class MyBertModel(torch.nn.Module):
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
         )
-        res = torch.cat(outputs["hidden_states"][-3:-2], -1)[0][1:-1]
-        # res = torch.cat(outputs[1][-3:-2], -1)[0][1:-1]
-        # return build_phone_level_feature(res, word2ph) #directly using this may cause bug and add a subgraph, use rust code
+        res = outputs["hidden_states"][-3][0][1:-1]
+        # Phone-level expansion stays in Rust (avoids export subgraph + bugs).
         return res
 
 
@@ -436,7 +686,7 @@ def export_bert(project_name):
     print("#### exported bert ####")
 
 
-def export(vits_path, gpt_path, project_name, vits_model="v2"):
+def export(vits_path, gpt_path, project_name, vits_model="v2", split_vits_ref=False):
     vits = VitsModel(vits_path, version=vits_model)
     gpt = T2SModel(gpt_path, vits)
     sv_model = None
@@ -474,7 +724,16 @@ def export(vits_path, gpt_path, project_name, vits_model="v2"):
         **_LEGACY_ONNX_KWARGS,
     )
     export_bert(project_name)
-    gpt_sovits.export(ref_seq, text_seq, ref_bert, text_bert, ref_audio_sr, ssl_content, project_name)
+    gpt_sovits.export(
+        ref_seq,
+        text_seq,
+        ref_bert,
+        text_bert,
+        ref_audio_sr,
+        ssl_content,
+        project_name,
+        split_vits_ref=split_vits_ref,
+    )
 
     a = gpt_sovits(ref_seq, text_seq, ref_bert, text_bert, ref_audio_sr, ssl_content).detach().cpu().numpy()
     soundfile.write("out.wav", a, vits.hps.data.sampling_rate)
@@ -517,6 +776,11 @@ if __name__ == "__main__":
         action="store_true",
         help="detect version from sovits.pth via process_ckpt",
     )
+    parser.add_argument(
+        "--split-vits-ref",
+        action="store_true",
+        help="Also export optional {name}_vits_ref.onnx + {name}_vits_decode.onnx (experimental; monolithic still exported)",
+    )
     args = parser.parse_args()
 
     try:
@@ -527,6 +791,6 @@ if __name__ == "__main__":
     vits_path = os.path.join(args.model_path, "sovits.pth")
     version = resolve_version(vits_path, args.version, args.auto_version)
     with torch.no_grad():
-        export(vits_path, gpt_path, args.export_name, version)
+        export(vits_path, gpt_path, args.export_name, version, split_vits_ref=args.split_vits_ref)
 
     # soundfile.write("out.wav", a, vits.hps.data.sampling_rate)

@@ -107,40 +107,30 @@ fn apply_top_p(logits: &mut [f32], top_p: f32) {
         return;
     }
     let mut order: Vec<usize> = (0..logits.len()).collect();
-    order.sort_by(|&a, &b| {
+    order.sort_unstable_by(|&a, &b| {
         logits[b]
             .partial_cmp(&logits[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let sorted_logits: Vec<f32> = order.iter().map(|&i| logits[i]).collect();
-    let max_l = sorted_logits[0];
-    let exp_sum: f32 = sorted_logits.iter().map(|&l| (l - max_l).exp()).sum();
-    let probs: Vec<f32> = sorted_logits
-        .iter()
-        .map(|&l| (l - max_l).exp() / exp_sum)
-        .collect();
-
+    let max_l = logits[order[0]];
+    let mut exp_sum = 0.0f32;
+    for &token_idx in &order {
+        exp_sum += (logits[token_idx] - max_l).exp();
+    }
     let mut cum = 0.0f32;
-    let mut remove = vec![false; logits.len()];
+    let mut cutoff = order.len();
     for (i, &token_idx) in order.iter().enumerate() {
-        cum += probs[i];
+        cum += (logits[token_idx] - max_l).exp() / exp_sum;
         if cum > top_p && i > 0 {
-            for &rm in &order[i..] {
-                remove[rm] = true;
-            }
+            cutoff = i;
             break;
         }
-        let _ = token_idx;
     }
     // Keep at least one option (matches PyTorch sorted_indices_to_remove[:, 0] = False).
-    if let Some(&keep) = order.first() {
-        remove[keep] = false;
-    }
-    for (i, logit) in logits.iter_mut().enumerate() {
-        if remove[i] {
-            *logit = f32::NEG_INFINITY;
-        }
+    cutoff = cutoff.max(1);
+    for &rm in &order[cutoff..] {
+        logits[rm] = f32::NEG_INFINITY;
     }
 }
 
@@ -150,8 +140,11 @@ fn apply_top_k(logits: &mut [f32], top_k: usize) {
     if k == 0 || k >= vocab {
         return;
     }
+    // Partial select: O(n) average vs full O(n log n) sort — same threshold semantics.
     let mut pivot: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-    pivot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    pivot.select_nth_unstable_by(k - 1, |a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
     let threshold = pivot[k - 1].1;
     for logit in logits.iter_mut() {
         if *logit < threshold {
@@ -326,5 +319,45 @@ mod tests {
         let mut sampler2 = Sampler::with_seed(42);
         let b = sampler2.sample(&mut l2, &[], &params);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn top_k_select_matches_full_sort_threshold() {
+        let mut a = vec![0.1, 5.0, 0.2, 4.0, 0.3, 3.0, 0.4, 2.0];
+        let mut b = a.clone();
+        apply_top_k(&mut a, 3);
+        // Reference full-sort path
+        let mut pivot: Vec<(usize, f32)> = b.iter().copied().enumerate().collect();
+        pivot.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap());
+        let threshold = pivot[2].1;
+        for logit in &mut b {
+            if *logit < threshold {
+                *logit = f32::NEG_INFINITY;
+            }
+        }
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn default_sampling_path_is_seed_stable() {
+        let mut base = vec![0.05f32; 1025];
+        base[10] = 2.5;
+        base[20] = 2.4;
+        base[30] = 2.3;
+        base[40] = 2.2;
+        base[50] = 1.0;
+        let params = SamplingParamsBuilder::new()
+            .temperature(1.0)
+            .top_k(4)
+            .top_p(0.9)
+            .repetition_penalty(1.35)
+            .seed(7)
+            .build();
+        let prev = vec![10i64, 20];
+        let mut s1 = Sampler::with_seed(7);
+        let mut s2 = Sampler::with_seed(7);
+        let mut l1 = base.clone();
+        let mut l2 = base.clone();
+        assert_eq!(s1.sample(&mut l1, &prev, &params), s2.sample(&mut l2, &prev, &params));
     }
 }
