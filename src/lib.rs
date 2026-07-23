@@ -61,9 +61,9 @@ static STANDALONE_TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 fn t2s_num_layers_from_session(session: &Session) -> usize {
     let n = session
-        .inputs
+        .inputs()
         .iter()
-        .filter(|input| input.name.starts_with("ik_cache_"))
+        .filter(|input| input.name().starts_with("ik_cache_"))
         .count();
     if n == 0 { DEFAULT_NUM_LAYERS } else { n }
 }

@@ -1,9 +1,9 @@
 use crate::cpu_info::get_hw_big_cores;
 use lazy_static::lazy_static;
-use std::{num::NonZero, path::Path};
+use std::path::Path;
 
 use ort::{
-    execution_providers::{CPUExecutionProvider, xnnpack::XNNPACKExecutionProvider},
+    execution_providers::CPUExecutionProvider,
     session::{Session, builder::GraphOptimizationLevel},
 };
 
@@ -26,11 +26,3 @@ pub fn create_onnx_cpu_session<P: AsRef<Path>>(path: P) -> Result<Session, GSVEr
         .with_intra_op_spinning(true)?
         .commit_from_file(path)?)
 }
-
-// pub fn create_onnx_xnnpack_cpu_session<P: AsRef<Path>>(path: P) -> Result<Session, GSVError> {
-//     Ok(Session::builder()?
-//         .with_execution_providers([XNNPACKExecutionProvider::default().with_intra_op_num_threads(NonZero::new(BIG_CORES.len()).unwrap())
-//             .build()])?
-//         .with_optimization_level(GraphOptimizationLevel::Level3)?
-//         .commit_from_file(path)?)
-// }

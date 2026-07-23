@@ -147,15 +147,18 @@ impl G2PW {
             let char_id = Tensor::from_array(Array::from_vec([*char_id as i64].to_vec())).unwrap();
 
             let model_ouput = self.model.as_mut().unwrap().run(ort::inputs![
-                "input_ids" => input_ids.clone(),
-                "token_type_ids" => token_type_ids.clone(),
-                "attention_mask" => attention_mask.clone(),
+                "input_ids" => &input_ids,
+                "token_type_ids" => &token_type_ids,
+                "attention_mask" => &attention_mask,
                 "phoneme_mask"=> phoneme_mask,
                 "char_ids" => char_id,
                 "position_ids"=> position_id_t,
             ])?;
 
-            let probs = model_ouput["probs"].try_extract_array::<f32>().unwrap();
+            let probs = model_ouput["probs"]
+                .try_extract_array::<f32>()
+                .unwrap()
+                .into_owned();
 
             let probs_view = probs.view();
 

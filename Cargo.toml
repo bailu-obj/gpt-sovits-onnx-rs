@@ -13,8 +13,8 @@ required-features = ["jni"]
 
 
 [dependencies]
-ort-sys = { version = "=2.0.0-rc.10" } # https://github.com/pykeio/ort/issues/399
-ort = { version = "=2.0.0-rc.10", features = [
+ort-sys = { version = "=2.0.0-rc.12" } # https://github.com/pykeio/ort/issues/399
+ort = { version = "=2.0.0-rc.12", features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",
@@ -22,7 +22,7 @@ ort = { version = "=2.0.0-rc.10", features = [
 ] }
 arpabet = "2.0.0"
 jieba-rs = "0.7.2"
-ndarray = "0.16.1"
+ndarray = "0.17.2"
 pinyin = "0.10.0"
 log = "0.4.25"
 hound = "3.5.1"
@@ -56,7 +56,7 @@ knf-rs-sys = "0.3.2"
 jni = ["dep:jni"] # Enables JNI and dynamic ONNX loading for Android
 
 [target.'cfg(target_os = "android")'.dependencies]
-ort = { version = "2.0.0-rc.10", features = [
+ort = { version = "2.0.0-rc.12", features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",

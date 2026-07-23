@@ -75,8 +75,8 @@ impl G2PEnModel {
         let attention_mask_tensor =
             Tensor::from_array(Array::from_elem((1, input_id_len), 1 as i64))?;
         let encoder_outputs = self.encoder_model.run(inputs![
-            "input_ids" => input_ids_tensor.clone(),
-            "attention_mask" => attention_mask_tensor.clone()
+            "input_ids" => &input_ids_tensor,
+            "attention_mask" => &attention_mask_tensor
         ])?;
 
         for _ in 0..50 {
@@ -89,7 +89,7 @@ impl G2PEnModel {
 
             let outputs = self.decoder_model.run(inputs![
                 "input_ids" => decoder_input_ids_tensor,
-                "encoder_attention_mask" => attention_mask_tensor.clone(),
+                "encoder_attention_mask" => &attention_mask_tensor,
                 "encoder_hidden_states" => encoder_output,
             ])?;
 
