@@ -105,6 +105,20 @@ V2Pro 还需 SV 权重：`GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w
 python scripts/optimize_aio.py --input-dir onnx/custom --output-dir onnx-patched/custom --no-quant
 ```
 
+量化提供两个配置：默认 `--profile compact` 沿用 BERT/G2PW INT4、语义
+decoder 动态 INT8（缩减范围）。`--profile quality` 将两个语义 decoder、
+VITS、SSL、T2S encoder 保留 FP32，只对 BERT/G2PW 的常量 MatMul 权重做
+INT8，块大小 32，`accuracy_level=1` 保留 FP32 激活；词嵌入、Attention、
+发音分类层不量化。`--no-quant` 对两种配置都生效。
+
+```bash
+python scripts/optimize_aio.py --input-dir onnx/custom_v2 \
+  --output-dir onnx-patched/custom_v2-quality --profile quality
+```
+
+quality 的目标是减少文本特征和自回归语义生成的量化损失；模型包与常驻
+内存增加，具体音质和速度须用相同参考音频、文本、采样参数在目标设备比较。
+
 ## 导出产物
 
 | 文件 | V2 | V2Pro / V2ProPlus |

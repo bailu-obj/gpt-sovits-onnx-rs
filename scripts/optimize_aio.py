@@ -43,6 +43,10 @@ def parse_args():
         action="store_true",
         help="Disable INT8 quantization for applicable models",
     )
+    parser.add_argument(
+        "--profile", choices=("compact", "quality"), default="compact",
+        help="compact: existing INT4/INT8 policy; quality: INT8 text weights, FP32 speech models",
+    )
     return parser.parse_args()
 
 
@@ -61,7 +65,25 @@ def validate_environment():
             exit(1)
 
 
-def process_model(file_path: str, output_path: str, use_quant: bool) -> str:
+def quantize_text_quality(model, output_path):
+    """Preserve float activations, embeddings and pronunciation heads."""
+    excluded = [n.name for n in model.graph.node
+                if any("classifier" in value for value in n.input)]
+    config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
+        block_size=32, is_symmetric=True, accuracy_level=1,
+        quant_format=quant_utils.QuantFormat.QOperator,
+        op_types_to_quantize=("MatMul",), bits=8,
+    )
+    quant = matmul_nbits_quantizer.MatMulNBitsQuantizer(
+        model, nodes_to_exclude=excluded, algo_config=config,
+    )
+    quant.process()
+    quant.model.save_model_to_file(output_path)
+    logger.info(f"Quality INT8 weights / FP32 activations: {output_path}")
+    return output_path
+
+
+def process_model(file_path: str, output_path: str, use_quant: bool, profile: str = "compact") -> str:
     """Process and optimize an ONNX model."""
     logger.info(f"Processing model: {file_path}")
     model = onnx.load(file_path)
@@ -89,6 +111,8 @@ def process_model(file_path: str, output_path: str, use_quant: bool) -> str:
         )
         model = version_converter.convert_version(optimized_model.model, 21)
         # model = slim(model)
+        if use_quant and profile == "quality":
+            return quantize_text_quality(model, output_path)
         if use_quant:
             quant_config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
                 block_size=64,  # 2's exponential and >= 16
@@ -128,6 +152,8 @@ def process_model(file_path: str, output_path: str, use_quant: bool) -> str:
     model = version_converter.convert_version(model, 21)
     logger.info(f"Opset conversion done for: {output_path}")
     if use_quant and "g2p" in output_lower:
+        if profile == "quality":
+            return quantize_text_quality(model, output_path)
         quant_config = matmul_nbits_quantizer.DefaultWeightOnlyQuantConfig(
             block_size=64,  # 2's exponential and >= 16
             # if true, quantize to Int4. otherwise, quantize to uint4.
@@ -149,7 +175,7 @@ def process_model(file_path: str, output_path: str, use_quant: bool) -> str:
         return output_path
 
     # INT8 quantization for specific models, do not quant for vits or ssl
-    if use_quant and ("decoder" in output_lower):
+    if use_quant and profile == "compact" and ("decoder" in output_lower):
         quantize_dynamic(
             model,
             output_path,
@@ -190,7 +216,7 @@ def main():
     for file_path in onnx_files:
         output_path = os.path.join(
             args.output_dir, os.path.basename(file_path))
-        final_path = process_model(file_path, output_path, not args.no_quant)
+        final_path = process_model(file_path, output_path, not args.no_quant, args.profile)
         logger.info(f"Optimization complete for: {final_path}")
 
     logger.info("All models processed successfully!")
