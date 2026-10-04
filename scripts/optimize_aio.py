@@ -31,12 +31,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Optimize ONNX models.")
     parser.add_argument(
         "--input-dir",
-        default="onnx/custom",
+        default="onnx/v2pro",
         help="Input directory containing ONNX files",
     )
     parser.add_argument(
         "--output-dir",
-        default="onnx-patched/custom",
+        default="onnx-patched/v2pro",
         help="Output directory for optimized models",
     )
     parser.add_argument(

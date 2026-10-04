@@ -6,31 +6,18 @@ use std::path::PathBuf;
 struct Args {
     #[arg(long)]
     model_path: PathBuf,
-    #[arg(long, default_value = "格式化，可以给自家的奶带来大量的。")]
+    #[arg(long)]
     ref_text: String,
-}
-
-fn find_model_prefix(assets_dir: &PathBuf) -> Result<String, GSVError> {
-    for entry in std::fs::read_dir(assets_dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(prefix) = name.strip_suffix("_vits.onnx") {
-            return Ok(prefix.to_string());
-        }
-    }
-    Err(GSVError::from("no *_vits.onnx in model path"))
 }
 
 fn main() -> Result<(), GSVError> {
     let args = Args::parse();
-    let prefix = find_model_prefix(&args.model_path)?;
     let mut model = TTSModel::new(
-        args.model_path.join(format!("{prefix}_vits.onnx")),
+        args.model_path.join("vits.onnx"),
         args.model_path.join("ssl.onnx"),
-        args.model_path.join(format!("{prefix}_t2s_encoder.onnx")),
-        args.model_path
-            .join(format!("{prefix}_t2s_fs_decoder.onnx")),
-        args.model_path.join(format!("{prefix}_t2s_s_decoder.onnx")),
+        args.model_path.join("t2s_encoder.onnx"),
+        args.model_path.join("t2s_fs_decoder.onnx"),
+        args.model_path.join("t2s_s_decoder.onnx"),
         Some(args.model_path.join("bert.onnx")),
         Some(args.model_path.join("g2pW.onnx")),
         None,

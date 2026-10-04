@@ -159,7 +159,7 @@ class T2SModel(nn.Module):
         torch.onnx.export(
             self.onnx_encoder,
             (ssl_content),
-            f"onnx/{project_name}/{project_name}_t2s_encoder.onnx",
+            f"onnx/{project_name}/t2s_encoder.onnx",
             input_names=["ssl_content"],
             output_names=["prompts"],
             dynamic_axes={
@@ -185,7 +185,7 @@ class T2SModel(nn.Module):
         torch.onnx.export(
             self.first_stage_decoder,
             (x, prompts, bert),
-            f"onnx/{project_name}/{project_name}_t2s_fs_decoder.onnx",
+            f"onnx/{project_name}/t2s_fs_decoder.onnx",
             input_names=["x", "prompts", "bert"],
             output_names=["logits"] + [f"k_cache_{i}" for i in range(num_layers)] + 
                          [f"v_cache_{i}" for i in range(num_layers)],
@@ -206,7 +206,7 @@ class T2SModel(nn.Module):
         torch.onnx.export(
             self.stage_decoder,
             (y, k_cache, v_cache, y_len, idx),
-            f"onnx/{project_name}/{project_name}_t2s_s_decoder.onnx",
+            f"onnx/{project_name}/t2s_s_decoder.onnx",
             input_names=["iy"] + [f"ik_cache_{i}" for i in range(num_layers)] + 
                         [f"iv_cache_{i}" for i in range(num_layers)] + ["y_len", "idx"],
             output_names=["logits"] + [f"k_cache_{i}" for i in range(num_layers)] + 
@@ -297,7 +297,7 @@ class GptSoVits(nn.Module):
             torch.onnx.export(
                 self.vits,
                 (text_seq, pred_semantic, ref_audio, sv_emb),
-                f"onnx/{project_name}/{project_name}_vits.onnx",
+                f"onnx/{project_name}/vits.onnx",
                 input_names=["text_seq", "pred_semantic", "ref_audio", "sv_emb"],
                 output_names=["audio"],
                 dynamic_axes={
@@ -313,7 +313,7 @@ class GptSoVits(nn.Module):
             torch.onnx.export(
                 self.vits,
                 (text_seq, pred_semantic, ref_audio),
-                f"onnx/{project_name}/{project_name}_vits.onnx",
+                f"onnx/{project_name}/vits.onnx",
                 input_names=["text_seq", "pred_semantic", "ref_audio"],
                 output_names=["audio"],
                 dynamic_axes={
@@ -517,7 +517,7 @@ def export_vits_only(vits_path, project_name, version):
         inputs += (torch.zeros((1, 20480)),)
         names.append("sv_emb")
     os.makedirs(f"onnx/{project_name}", exist_ok=True)
-    torch.onnx.export(model, inputs, f"onnx/{project_name}/{project_name}_vits.onnx",
+    torch.onnx.export(model, inputs, f"onnx/{project_name}/vits.onnx",
         input_names=names, output_names=["audio"],
         dynamic_axes={"text_seq": {1: "text_length"}, "pred_semantic": {2: "pred_length"},
                       "ref_audio": {1: "audio_length"}},
@@ -526,7 +526,7 @@ def export_vits_only(vits_path, project_name, version):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export model to ONNX")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model directory")
-    parser.add_argument("--export_name", type=str, required=True, help="Project Name for the exported model")
+    parser.add_argument("--export_name", type=str, required=True, help="Output directory name; ONNX filenames have no prefix")
     parser.add_argument(
         "--version",
         type=str,

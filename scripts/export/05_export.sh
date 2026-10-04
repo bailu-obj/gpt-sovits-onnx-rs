@@ -15,6 +15,7 @@ MODEL_PATH=""
 PROFILE="quality"
 REF_AUDIO=""
 REF_TEXT=""
+TEXT=""
 
 usage() {
     cat <<'EOF'
@@ -24,13 +25,14 @@ Export ONNX models and run optimize_aio post-processing.
 
 Options:
   --version VERSION       Required: v2, v2Pro, or v2ProPlus
-  --export-name NAME      Required: output bundle name (e.g. custom)
+  --export-name NAME      Required: output bundle name (e.g. v2pro)
   --gpt-sovits-dir PATH   Upstream clone path
   --vits-only             Refresh VITS only; existing speech/text exports required
   --model-path PATH       Checkpoint directory (default: staged official models)
   --profile PROFILE       quality (default) or compact quantization
   --ref-audio PATH        Reference WAV to copy into the bundle
   --ref-text TEXT         Accurate reference transcription (required for smoke test)
+  --text TEXT             Text to synthesize (required for smoke test)
   --output-dir PATH       Copy/symlink final bundle here (optional)
   --no-quant              Disable INT8 quantization (default)
   --quant                 Enable INT8 quantization
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --profile) PROFILE="$2"; shift 2 ;;
     --ref-audio) REF_AUDIO="$2"; shift 2 ;;
     --ref-text) REF_TEXT="$2"; shift 2 ;;
+    --text) TEXT="$2"; shift 2 ;;
     --version)
         VERSION="$2"
         shift 2
@@ -156,6 +159,7 @@ fi
 
 if $SMOKE_TEST; then
     [[ -n "${REF_TEXT}" ]] || die "--ref-text is required for a smoke test"
+    [[ -n "${TEXT}" ]] || die "--text is required for a smoke test"
     require_cmd cargo
     local_model="${OUTPUT_DIR:-${PATCHED_DIR}}"
     log_info "Running Rust smoke test"
@@ -164,6 +168,6 @@ if $SMOKE_TEST; then
         cargo run --release --example gpt_sovits_demo -- \
             --model-path "${local_model}" \
             --ref-text "${REF_TEXT}" \
-            --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
+            --text "${TEXT}"
     )
 fi

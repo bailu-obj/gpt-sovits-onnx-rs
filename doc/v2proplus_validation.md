@@ -18,8 +18,8 @@ Validated on 2026-07-09 (macOS).
 
 RUST_LOG=Debug cargo run --release --example gpt_sovits_demo -- \
   --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
-  --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
+  --ref-text "<参考音频的准确转录>" \
+  --text "<待合成文本>"
 ```
 
 ## Export Results
@@ -64,4 +64,4 @@ Key runtime behaviors aligned with upstream `TTS.py`:
 ## Notes
 
 - `v2ProPlus` shares the same Pro-family runtime path as `v2Pro`; Rust detects Pro-family models by the presence of `sv.onnx`.
-- Use `--export-name custom` if you want filenames like `custom_vits.onnx`, or any export name with the updated demo auto-discovery (`*_vits.onnx` prefix detection).
+- Use `--export-name custom` if you want filenames like `custom_vits.onnx`, or any export name with the updated demo auto-discovery (`vits.onnx` prefix detection).

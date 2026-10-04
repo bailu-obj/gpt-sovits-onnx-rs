@@ -78,8 +78,7 @@ mod tests {
 
     #[test]
     fn kaldi_fbank_frame_count_matches_python_reference() {
-        let wav_path =
-            std::path::Path::new("gpt-sovits-upstream/onnx-patched/custom_v2proplus/ref.wav");
+        let wav_path = std::path::Path::new("gpt-sovits-upstream/onnx-patched/v2proplus/ref.wav");
         if !wav_path.exists() {
             return;
         }

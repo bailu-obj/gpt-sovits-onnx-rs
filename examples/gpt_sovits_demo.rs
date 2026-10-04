@@ -6,24 +6,18 @@ use std::time::Instant;
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(
-        long,
-        default_value = "/home/qiang/projects/GPT-SoVITS/onnx-patched/custom"
-    )]
+    #[arg(long, default_value = "gpt-sovits-upstream/onnx-patched/v2pro-quality")]
     model_path: PathBuf,
     /// Optional JSON file to override built-in sampling defaults.
     #[arg(long)]
     params: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
     run_count: usize,
-    #[arg(
-        long,
-        default_value = "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
-    )]
+    #[arg(long)]
     text: String,
     #[arg(long, default_value = "zh")]
     lang: String,
-    #[arg(long, default_value = "格式化，可以给自家的奶带来大量的。")]
+    #[arg(long)]
     ref_text: String,
     #[arg(long)]
     top_k: Option<usize>,
@@ -101,30 +95,6 @@ fn resolve_infer_params(args: &Args) -> Result<InferParams, GSVError> {
     Ok(params)
 }
 
-fn find_model_prefix(assets_dir: &Path) -> Result<String, GSVError> {
-    if assets_dir.join("custom_vits.onnx").exists() {
-        return Ok("custom".to_string());
-    }
-
-    for entry in std::fs::read_dir(assets_dir).map_err(|e| {
-        GSVError::FileNotFound(format!(
-            "Failed to read model directory {:?}: {}",
-            assets_dir, e
-        ))
-    })? {
-        let entry = entry.map_err(|e| GSVError::from(e.to_string()))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(prefix) = name.strip_suffix("_vits.onnx") {
-            return Ok(prefix.to_string());
-        }
-    }
-
-    Err(GSVError::FileNotFound(format!(
-        "No *_vits.onnx found in {:?}",
-        assets_dir
-    )))
-}
-
 fn create_model(assets_dir: &Path) -> Result<TTSModel, GSVError> {
     if !assets_dir.exists() {
         return Err(GSVError::FileNotFound(format!(
@@ -132,13 +102,12 @@ fn create_model(assets_dir: &Path) -> Result<TTSModel, GSVError> {
             assets_dir
         )));
     }
-    let prefix = find_model_prefix(assets_dir)?;
     TTSModel::new(
-        assets_dir.join(format!("{prefix}_vits.onnx")),
+        assets_dir.join("vits.onnx"),
         assets_dir.join("ssl.onnx"),
-        assets_dir.join(format!("{prefix}_t2s_encoder.onnx")),
-        assets_dir.join(format!("{prefix}_t2s_fs_decoder.onnx")),
-        assets_dir.join(format!("{prefix}_t2s_s_decoder.onnx")),
+        assets_dir.join("t2s_encoder.onnx"),
+        assets_dir.join("t2s_fs_decoder.onnx"),
+        assets_dir.join("t2s_s_decoder.onnx"),
         Some(assets_dir.join("bert.onnx")),
         Some(assets_dir.join("g2pW.onnx")),
         Some(assets_dir.join("g2p_en")),

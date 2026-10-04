@@ -136,19 +136,19 @@ def main() -> int:
     )
     parser.add_argument(
         "--text",
-        default="你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。",
+        required=True,
         help="Text to synthesize",
     )
     parser.add_argument(
         "--ref-text",
-        default="格式化，可以给自家的奶带来大量的。",
+        required=True,
         help="Reference prompt text",
     )
     args = parser.parse_args()
 
     repo = args.repo.resolve()
     upstream = repo / "gpt-sovits-upstream"
-    model_path = args.model_path or (upstream / "onnx-patched/custom_v2proplus")
+    model_path = args.model_path or (upstream / "onnx-patched/v2proplus")
     params_path = args.params
     if params_path is None:
         bundle_params = model_path / "infer_params.json"

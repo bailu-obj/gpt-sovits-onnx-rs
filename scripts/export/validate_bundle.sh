@@ -49,37 +49,30 @@ require_file() {
     [[ -f "${BUNDLE_DIR}/$1" ]] || die "Missing required file: ${BUNDLE_DIR}/$1"
 }
 
-PREFIX=""
-for candidate in "${BUNDLE_DIR}"/*_vits.onnx; do
-    [[ -e "${candidate}" ]] || continue
-    PREFIX="$(basename "${candidate}" "_vits.onnx")"
-    break
-done
-[[ -n "${PREFIX}" ]] || die "No *_vits.onnx found in ${BUNDLE_DIR}"
 
 require_file "ssl.onnx"
 require_file "bert.onnx"
 require_file "g2pW.onnx"
-require_file "${PREFIX}_vits.onnx"
-require_file "${PREFIX}_t2s_encoder.onnx"
-require_file "${PREFIX}_t2s_fs_decoder.onnx"
-require_file "${PREFIX}_t2s_s_decoder.onnx"
+require_file "vits.onnx"
+require_file "t2s_encoder.onnx"
+require_file "t2s_fs_decoder.onnx"
+require_file "t2s_s_decoder.onnx"
 require_file "g2p_en/encoder_model.onnx"
 require_file "g2p_en/decoder_model.onnx"
 
 resolve_env_manager
-run_python "${ONNX_RS_ROOT}/scripts/vits_dynamic.py" "${BUNDLE_DIR}/${PREFIX}_vits.onnx"
+run_python "${ONNX_RS_ROOT}/scripts/vits_dynamic.py" "${BUNDLE_DIR}/vits.onnx"
 
 if $EXPECT_V2PRO; then
     require_file "sv.onnx"
-    grep -aq "sv_emb" "${BUNDLE_DIR}/${PREFIX}_vits.onnx" || \
-        die "Expected sv_emb input in ${PREFIX}_vits.onnx"
+    grep -aq "sv_emb" "${BUNDLE_DIR}/vits.onnx" || \
+        die "Expected sv_emb input in vits.onnx"
 fi
 
-JSON_CANDIDATE="$(dirname "${BUNDLE_DIR}")/${PREFIX}.json"
+JSON_CANDIDATE="$(dirname "${BUNDLE_DIR}")/$(basename "${BUNDLE_DIR}").json"
 if [[ -f "${JSON_CANDIDATE}" ]]; then
     log_info "Metadata: ${JSON_CANDIDATE}"
     grep -E '"Version"|"IsV2Pro"' "${JSON_CANDIDATE}" || true
 fi
 
-log_ok "Bundle validation passed for ${BUNDLE_DIR} (prefix=${PREFIX})"
+log_ok "Bundle validation passed for ${BUNDLE_DIR}"

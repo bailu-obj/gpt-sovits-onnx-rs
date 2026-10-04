@@ -7,11 +7,10 @@
 推荐从官方 `s1v3.ckpt` 与 `v2Pro/s2Gv2Pro.pth` 导出 v2Pro，使用 quality
 量化策略：仅 BERT/G2PW MatMul 权重 INT8，激活、T2S、VITS、SSL 和 SV 保持
 FP32。完整部署包含 `sv.onnx`，约 2.12 GiB；macOS 和 Android 使用同一套模型。
-参考音频应清晰、底噪低，并配准确转录。本次白露试听采用白露参考音频及
-`看起来是类似仓库的地方呢，呜…这里也臭烘烘的。`，效果由用户比较确认。
+参考音频应清晰、底噪低，并提供与实际音频逐字匹配的转录。
+请自行准备有权使用的参考音频，音色效果需在目标设备试听确认。
 
-Bailu 只部署 v2Pro quality，其他版本的模型不再作为 App 预设；本推理库仍
-支持 v2 / v2Pro / v2ProPlus 和其他量化策略。导出与量化步骤见
+推荐部署 v2Pro quality；本推理库仍支持 v2 / v2Pro / v2ProPlus 和其他量化策略。导出与量化步骤见
 [转换脚本说明](scripts/README.md)。动态长度掩码检查不可省略。
 
 ## 项目简介
@@ -93,30 +92,20 @@ Bailu 只部署 v2Pro quality，其他版本的模型不再作为 App 预设；�
 如果您不想自行训练和导出模型，可以使用预训练模型进行快速体验。
 
 * **主模型下载地址**：[huggingface.co/mikv39/gpt-sovits-onnx-custom](https://huggingface.co/mikv39/gpt-sovits-onnx-custom)
-* 仓库提供两个子目录：`quant/`（量化版，约 0.9 GB，推荐）和 `unquant/`（全精度版，约 2.8 GB）。下载后将整个子目录作为 `--model-path` 传入。
-
-> **版权声明**：此模型使用了受版权保护的音视频素材进行微调，请勿用于任何商业用途。
+建议按下文流程自行导出官方 v2Pro quality。HF 下载包将在后续更新；新的
+模型文件统一为 `vits.onnx`、`t2s_encoder.onnx`、
+`t2s_fs_decoder.onnx`、`t2s_s_decoder.onnx`，不保留旧前缀。
 
 **g2p_en 英文 G2P**：HF 预训练包已内置 `g2p_en/`。若自行导出模型，macOS 流程会在 `04_download_models.sh` 自动下载；也可从 [cisco-ai/mini-bart-g2p](https://huggingface.co/cisco-ai/mini-bart-g2p/tree/main/onnx) 手动获取并放入模型目录的 `g2p_en/` 子文件夹。
 
 ### 参考音频（ref.wav）
 
-`gpt_sovits_demo` 会从模型目录读取 `ref.wav` 作为参考音色。HF 预训练包的 `quant/` 与 `unquant/` 目录均已包含 `ref.wav`。
-
-- 建议参考文本（与示例音频匹配）：`格式化，可以给自家的奶带来大量的。`
-
-下载量化版模型目录（含 `ref.wav`、`g2p_en/` 与全部 ONNX 文件）：
+`gpt_sovits_demo` 从模型目录读取 `ref.wav`。请自行准备参考 WAV，
+将其复制到所选模型目录并命名为 `ref.wav`。`--ref-text` 必须是该音频的
+准确转录，`--text` 是需要合成的文字；下列占位符需自行替换。
 
 ```bash
-huggingface-cli download mikv39/gpt-sovits-onnx-custom quant --local-dir ./gpt-sovits-onnx-custom-quant
-MODEL_DIR=./gpt-sovits-onnx-custom-quant
-```
-
-全精度版：
-
-```bash
-huggingface-cli download mikv39/gpt-sovits-onnx-custom unquant --local-dir ./gpt-sovits-onnx-custom-unquant
-MODEL_DIR=./gpt-sovits-onnx-custom-unquant
+MODEL_DIR=./gpt-sovits-upstream/onnx-patched/v2pro-quality
 ```
 
 运行 demo 时通过 CLI 指定参考文本与合成文本；采样参数使用程序内置默认值：
@@ -124,8 +113,8 @@ MODEL_DIR=./gpt-sovits-onnx-custom-unquant
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
-  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --text "<待合成文本>" \
+  --ref-text "<参考音频的准确转录>" \
   --output output.wav
 ```
 
@@ -134,8 +123,8 @@ cargo run --release --example gpt_sovits_demo -- \
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
-  --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
+  --ref-text "<参考音频的准确转录>" \
+  --text "<待合成文本>" \
   --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35
 ```
 
@@ -174,12 +163,13 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 ./scripts/export/02_patch.sh
 ./scripts/export/03_setup_env.sh --source HF
 ./scripts/export/04_download_models.sh --version v2Pro
-./scripts/export/05_export.sh --version v2Pro --export-name custom --no-quant
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro --quant --profile quality \
+  --output-dir gpt-sovits-upstream/onnx-patched/v2pro-quality
 
 # v2ProPlus（与 v2Pro 共用 SV 分支，仅 SoVITS 权重不同）
 ./scripts/export/04_download_models.sh --version v2ProPlus
-./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --no-quant
-./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/custom_v2proplus --expect-v2pro
+./scripts/export/05_export.sh --version v2ProPlus --export-name v2proplus --no-quant
+./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/v2proplus --expect-v2pro
 ```
 
 详见 [scripts/README.md — macOS 分阶段导出](scripts/README.md#macos-分阶段导出)。
@@ -192,13 +182,13 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 cargo build --release
 ```
 
-使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `*_vits.onnx` 自动选择 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先下载 `quant/` 或 `unquant/` 子目录（含 `ref.wav`），见上文「参考音频」一节。
+使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `vits.onnx` 载入 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先准备模型及自行选择的 `ref.wav`，见上文「参考音频」一节。
 
 ```bash
 RUST_LOG=debug cargo run --release --example gpt_sovits_demo -- \
-  --model-path /path/to/onnx-patched/custom_v2proplus \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
-  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --model-path /path/to/onnx-patched/v2proplus \
+  --text "<待合成文本>" \
+  --ref-text "<参考音频的准确转录>" \
   --output output.wav
 ```
 

@@ -7,7 +7,6 @@
 macOS / Android 推荐官方 **v2Pro + quality**。使用 `s1v3.ckpt` 和
 `v2Pro/s2Gv2Pro.pth`；BERT/G2PW 仅 MatMul 权重 INT8，T2S、VITS、SSL、SV
 及激活保持 FP32。模型约 2.12 GiB，必须部署 `sv.onnx`。
-Bailu 已统一使用这一版本与白露的清晰参考音频，不再部署 v2 或原始版比较包。
 参考文字必须与实际 WAV 匹配，不能沿用其他音频的默认转录。
 
 ## 目录结构
@@ -57,12 +56,12 @@ Bailu 已统一使用这一版本与白露的清晰参考音频，不再部署 v
 ./scripts/export/04_download_models.sh --version v2Pro
 
 # 5. 导出 ONNX（--version 与 --export-name 必填）
-./scripts/export/05_export.sh --version v2Pro --export-name custom --quant --profile quality
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro --quant --profile quality
 
 # V2ProPlus
 ./scripts/export/04_download_models.sh --version v2ProPlus
-./scripts/export/05_export.sh --version v2ProPlus --export-name custom_v2proplus --no-quant
-./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/custom_v2proplus --expect-v2pro
+./scripts/export/05_export.sh --version v2ProPlus --export-name v2proplus --no-quant
+./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/v2proplus --expect-v2pro
 ```
 
 输出目录：`gpt-sovits-upstream/onnx-patched/{export_name}/`
@@ -92,16 +91,16 @@ Bailu 已统一使用这一版本与白露的清晰参考音频，不再部署 v
 
 ```bash
 # V2
-python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2 --export_name custom --version v2
+python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2 --export_name v2 --version v2
 
 # V2Pro
-python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2pro --export_name custom --version v2Pro
+python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2pro --export_name v2pro --version v2Pro
 
 # V2ProPlus
-python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2proplus --export_name custom --version v2ProPlus
+python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2proplus --export_name v2proplus --version v2ProPlus
 
 # 自动检测版本
-python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2pro --export_name custom --auto-version
+python GPT_SoVITS/export_onnx_v2.py --model_path ./models/v2pro --export_name v2pro --auto-version
 ```
 
 V2Pro 还需 SV 权重：`GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt`。
@@ -110,7 +109,7 @@ V2Pro 还需 SV 权重：`GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w
 6. 运行优化（建议首次 `--no-quant`）：
 
 ```bash
-python scripts/optimize_aio.py --input-dir onnx/custom --output-dir onnx-patched/custom --no-quant
+python scripts/optimize_aio.py --input-dir onnx/v2pro --output-dir onnx-patched/v2pro --no-quant
 ```
 
 量化提供两个配置：默认 `--profile compact` 沿用 BERT/G2PW INT4、语义
@@ -120,8 +119,8 @@ INT8，块大小 32，`accuracy_level=1` 保留 FP32 激活；词嵌入、Attent
 发音分类层不量化。`--no-quant` 对两种配置都生效。
 
 ```bash
-python scripts/optimize_aio.py --input-dir onnx/custom_v2 \
-  --output-dir onnx-patched/custom_v2-quality --profile quality
+python scripts/optimize_aio.py --input-dir onnx/v2 \
+  --output-dir onnx-patched/v2-quality --profile quality
 ```
 
 quality 的目标是减少文本特征和自回归语义生成的量化损失；模型包与常驻
@@ -158,22 +157,22 @@ quality 的目标是减少文本特征和自回归语义生成的量化损失；
 - Rust：`InferParams::default()`；demo 可用 `--top-k` 等 CLI 覆盖
 - Python：[`scripts/sampling_defaults.py`](sampling_defaults.py)；`run_python_baseline.py` 内置相同默认值
 - 可选：通过 `--params path/to.json` 覆盖部分采样字段（仅当你需要非默认配置时）
-- 文本：`--text` / `--ref-text` 始终由 CLI 传入（有内置默认值）
+- 文本：`--text` / `--ref-text` 必须由调用方显式传入，不提供特定参考音频的默认转录
 
 ## Rust 推理验证
 
-下载量化版模型目录（含 `ref.wav`、`g2p_en/` 与全部 ONNX 文件）：
+导出推荐 quality 模型，再复制准确匹配转录的参考 WAV 到模型目录：
 
 ```bash
-huggingface-cli download mikv39/gpt-sovits-onnx-custom quant --local-dir ./gpt-sovits-onnx-custom-quant
-MODEL_DIR=./gpt-sovits-onnx-custom-quant
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro --quant --profile quality
+MODEL_DIR=./gpt-sovits-upstream/onnx-patched/v2pro
 ```
 
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
-  --ref-text "格式化，可以给自家的奶带来大量的。" \
+  --text "<待合成文本>" \
+  --ref-text "<参考音频的准确转录>" \
   --output output.wav
 ```
 
@@ -182,8 +181,8 @@ cargo run --release --example gpt_sovits_demo -- \
 ```bash
 cargo run --release --example gpt_sovits_demo -- \
   --model-path "${MODEL_DIR}" \
-  --ref-text "格式化，可以给自家的奶带来大量的。" \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
+  --ref-text "<参考音频的准确转录>" \
+  --text "<待合成文本>" \
   --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35
 ```
 
@@ -201,7 +200,7 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 
 # 仅 v2ProPlus + SV 嵌入对比
 gpt-sovits-upstream/.venv/bin/python scripts/compare_infer_metrics.py \
-  --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus
+  --model-path gpt-sovits-upstream/onnx-patched/v2proplus
 ```
 
 输出示例：
@@ -217,9 +216,9 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_infer_metrics.py \
 
 ```bash
 cargo run --release --example dump_rust_t2s -- \
-  --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
-  --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。" \
-  --ref-text "格式化，可以给自家的奶带来大量的。"
+  --model-path gpt-sovits-upstream/onnx-patched/v2proplus \
+  --text "<待合成文本>" \
+  --ref-text "<参考音频的准确转录>"
 ```
 
 导出后可用 [`validate_bundle.sh`](export/validate_bundle.sh) 检查产物是否完整；`v2ProPlus` 端到端验证记录见 [`doc/v2proplus_validation.md`](../doc/v2proplus_validation.md)。
@@ -243,12 +242,13 @@ optimization and verifies them afterward. `vits_dynamic.py INPUT --output OUTPUT
 repairs an old FP32 export without quantizing its weights; omitting `--output`
 validates only. Repairing masks does not require changing ORT.
 
-For custom v2 checkpoints, `05_export.sh --version v2 --export-name custom_v2
+For custom v2 checkpoints, `05_export.sh --version v2 --export-name v2
 --model-path "$HOME/models/gpt-sovits-simple/kaoyu_v2"` accepts
 `kaoyu_gpt.ckpt` / `kaoyu_sovits.pth`. v2Pro defaults to the staged official
 `s1v3.ckpt` / `v2Pro/s2Gv2Pro.pth`. Use `--quant --profile quality` for text INT8
 weights with FP32 speech models, or `--profile compact` for the compact policy.
-Use an accurate `--ref-text` with `--ref-audio` when requesting `--smoke-test`.
+Supply your own `--ref-audio`, its accurate `--ref-text`, and synthesis `--text`
+when requesting `--smoke-test`.
 
 Regression checks: `python -m unittest discover -s scripts -p test_vits_dynamic.py`
 and `cargo test --release --lib`. Test audio longer than the original trace and
