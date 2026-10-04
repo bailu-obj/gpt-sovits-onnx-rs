@@ -8,7 +8,6 @@ from module import commons
 from module import modules
 from module import attentions_onnx as attentions
 
-from f5_tts.model import DiT
 
 from torch.nn import Conv1d, ConvTranspose1d, Conv2d
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
@@ -877,7 +876,8 @@ class SynthesizerTrn(nn.Module):
             self.prelu = nn.PReLU(num_parameters=gin_channels)
 
     def forward(self, codes, text, refer, noise_scale=0.5, speed=1, sv_emb=None):
-        refer_lengths = torch.LongTensor([refer.size(2)]).to(refer.device)
+        # Keep shape-derived lengths in the ONNX graph; LongTensor([size]) freezes them.
+        refer_lengths = torch._shape_as_tensor(refer)[2].reshape(1).to(refer.device)
         refer_mask = torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(refer.dtype)
         if self.version == "v1":
             ge = self.ref_enc(refer * refer_mask, refer_mask)
@@ -892,8 +892,8 @@ class SynthesizerTrn(nn.Module):
         if self.semantic_frame_rate == "25hz":
             quantized = F.interpolate(quantized, scale_factor=2.0, mode="nearest")
 
-        y_lengths = torch.LongTensor([quantized.size(2)]).to(codes.device)
-        text_lengths = torch.LongTensor([text.size(1)]).to(codes.device)
+        y_lengths = torch._shape_as_tensor(quantized)[2].reshape(1).to(codes.device)
+        text_lengths = torch._shape_as_tensor(text)[1].reshape(1).to(codes.device)
 
         if self.is_v2pro:
             ge_ = self.ge_to512(ge.transpose(2, 1)).transpose(2, 1)
@@ -973,13 +973,13 @@ def set_no_grad(net_g):
 
 @torch.jit.script_if_tracing
 def compile_codes_length(codes):
-    y_lengths1 = torch.LongTensor([codes.size(2)]).to(codes.device)
+    y_lengths1 = torch._shape_as_tensor(codes)[2].reshape(1).to(codes.device)
     return y_lengths1 * 2.5 * 1.5
 
 
 @torch.jit.script_if_tracing
 def compile_ref_length(refer):
-    refer_lengths = torch.LongTensor([refer.size(2)]).to(refer.device)
+    refer_lengths = torch._shape_as_tensor(refer)[2].reshape(1).to(refer.device)
     return refer_lengths
 
 
@@ -1013,6 +1013,7 @@ class SynthesizerTrnV3(nn.Module):
         version="v3",
         **kwargs,
     ):
+        from f5_tts.model import DiT
         super().__init__()
         self.spec_channels = spec_channels
         self.inter_channels = inter_channels

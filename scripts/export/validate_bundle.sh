@@ -67,6 +67,9 @@ require_file "${PREFIX}_t2s_s_decoder.onnx"
 require_file "g2p_en/encoder_model.onnx"
 require_file "g2p_en/decoder_model.onnx"
 
+resolve_env_manager
+run_python "${ONNX_RS_ROOT}/scripts/vits_dynamic.py" "${BUNDLE_DIR}/${PREFIX}_vits.onnx"
+
 if $EXPECT_V2PRO; then
     require_file "sv.onnx"
     grep -aq "sv_emb" "${BUNDLE_DIR}/${PREFIX}_vits.onnx" || \

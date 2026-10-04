@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import logging
 import onnx
+from vits_dynamic import repair_vits_masks, validate_vits_masks
 from onnx import version_converter
 from onnxsim import simplify
 from onnxruntime.quantization import quantize_dynamic, QuantType
@@ -91,11 +92,14 @@ def process_model(file_path: str, output_path: str, use_quant: bool, profile: st
 
     # vits model may change and have issue in simplify
     if "vits" in output_lower:
+        logger.info("Repaired VITS masks: %s", repair_vits_masks(model))
         # model = optimize(model, passes=get_fuse_and_elimination_passes())
         # logger.info(f"ONNX optimization done for: {output_path}")
         model = slim(model)
         logger.info(f"ONNX simplification done for: {output_path}")
         model = version_converter.convert_version(model, 21)
+        validate_vits_masks(model)
+        onnx.checker.check_model(model)
         onnx.save(model, output_path)
         return output_path
 

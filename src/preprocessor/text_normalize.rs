@@ -175,7 +175,7 @@ static PUNCTUATION_PERIODS_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 static PUNCTUATION_COMMAS_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"[\u{002C}\u{2018}\u{2019}\u{201C}\u{201D}\u{2022}\u{FF0C}\u{FF1A}\u{FF1B}\u{FF0B}\u{FF1D}\u{FF5E}\u{2014}\u{2013}\u{FF3B}\u{FF3D}\u{FF08}\u{FF09}\u{3001}\u{FF5F}\u{FF1C}\u{FF1E}\u{300A}\u{300B}\u{300C}\u{300D}\u{FF1F}\u{FF3F}\u{002A}\u{003D}\u{00A9}\u{2212}\u{2021}\u{203B}\u{2047}\u{3008}\u{3009}\u{300E}\u{300F}\u{FF0F}\u{0023}]+",
+        r"[\u{002C}\u{2018}\u{2019}\u{201C}\u{201D}\u{2022}\u{FF0C}\u{FF1A}\u{FF1B}\u{FF0B}\u{FF1D}\u{FF5E}\u{2014}\u{2013}\u{FF3B}\u{FF3D}\u{FF08}\u{FF09}\u{3001}\u{FF5F}\u{FF1C}\u{FF1E}\u{300A}\u{300B}\u{300C}\u{300D}\u{FF3F}\u{002A}\u{003D}\u{00A9}\u{2212}\u{2021}\u{203B}\u{2047}\u{3008}\u{3009}\u{300E}\u{300F}\u{FF0F}\u{0023}]+",
     )
     .unwrap()
 });
@@ -187,6 +187,15 @@ static COLLAPSE_PERIODS_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.{2,}").
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_marks_keep_sentence_boundaries() {
+        let text = text_normalize("风凉吗？午饭吃了吗？我们走走吧。");
+        assert_eq!(
+            super::super::seg::pre_seg_text(&text, false),
+            vec!["。风凉吗.", "午饭吃了吗.", "我们走走吧."]
+        );
+    }
 
     #[test]
     fn test_zh_normalize_preserves_comma_space() {

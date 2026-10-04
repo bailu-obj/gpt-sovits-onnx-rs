@@ -10,6 +10,11 @@ EXPORT_NAME=""
 NO_QUANT=true
 OUTPUT_DIR=""
 SMOKE_TEST=false
+VITS_ONLY=false
+MODEL_PATH=""
+PROFILE="quality"
+REF_AUDIO=""
+REF_TEXT=""
 
 usage() {
     cat <<'EOF'
@@ -21,6 +26,11 @@ Options:
   --version VERSION       Required: v2, v2Pro, or v2ProPlus
   --export-name NAME      Required: output bundle name (e.g. custom)
   --gpt-sovits-dir PATH   Upstream clone path
+  --vits-only             Refresh VITS only; existing speech/text exports required
+  --model-path PATH       Checkpoint directory (default: staged official models)
+  --profile PROFILE       quality (default) or compact quantization
+  --ref-audio PATH        Reference WAV to copy into the bundle
+  --ref-text TEXT         Accurate reference transcription (required for smoke test)
   --output-dir PATH       Copy/symlink final bundle here (optional)
   --no-quant              Disable INT8 quantization (default)
   --quant                 Enable INT8 quantization
@@ -31,6 +41,11 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+    --vits-only) VITS_ONLY=true; shift ;;
+    --model-path) MODEL_PATH="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
+    --ref-audio) REF_AUDIO="$2"; shift 2 ;;
+    --ref-text) REF_TEXT="$2"; shift 2 ;;
     --version)
         VERSION="$2"
         shift 2
@@ -77,21 +92,32 @@ init_paths
 require_clone
 resolve_env_manager
 
-MODEL_STAGE="${GPT_SOVITS_ROOT}/models/export/${VERSION}"
+MODEL_STAGE="${MODEL_PATH:-${GPT_SOVITS_ROOT}/models/export/${VERSION}}"
+[[ "${PROFILE}" == quality || "${PROFILE}" == compact ]] || die "Invalid profile"
+GPT_CHECKPOINT="${MODEL_STAGE}/gpt.ckpt"
+SOVITS_CHECKPOINT="${MODEL_STAGE}/sovits.pth"
+if [[ ! -f "${GPT_CHECKPOINT}" && -f "${MODEL_STAGE}/kaoyu_gpt.ckpt" ]]; then
+    GPT_CHECKPOINT="${MODEL_STAGE}/kaoyu_gpt.ckpt"
+    SOVITS_CHECKPOINT="${MODEL_STAGE}/kaoyu_sovits.pth"
+fi
 [[ -d "${MODEL_STAGE}" ]] || die "Staged models not found at ${MODEL_STAGE}. Run 04_download_models.sh first."
-[[ -f "${MODEL_STAGE}/gpt.ckpt" && -f "${MODEL_STAGE}/sovits.pth" ]] || \
+[[ -f "${GPT_CHECKPOINT}" && -f "${SOVITS_CHECKPOINT}" ]] || \
     die "gpt.ckpt or sovits.pth missing in ${MODEL_STAGE}"
 
 RAW_DIR="${GPT_SOVITS_ROOT}/onnx/${EXPORT_NAME}"
 PATCHED_DIR="${GPT_SOVITS_ROOT}/onnx-patched/${EXPORT_NAME}"
 
+EXPORT_ARGS=()
+if $VITS_ONLY; then EXPORT_ARGS+=(--vits-only); fi
+
 log_info "Exporting ONNX (${VERSION} -> ${EXPORT_NAME})"
 (
     cd "${GPT_SOVITS_ROOT}"
     run_python GPT_SoVITS/export_onnx_v2.py \
-        --model_path "./models/export/${VERSION}" \
+        --model_path "${MODEL_STAGE}" \
+        --gpt-checkpoint "${GPT_CHECKPOINT}" --sovits-checkpoint "${SOVITS_CHECKPOINT}" \
         --export_name "${EXPORT_NAME}" \
-        --version "${VERSION}"
+        --version "${VERSION}" "${EXPORT_ARGS[@]}"
 )
 
 G2PW_ONNX="${GPT_SOVITS_ROOT}/GPT_SoVITS/text/G2PWModel/g2pW.onnx"
@@ -104,7 +130,7 @@ G2P_EN_SRC="${GPT_SOVITS_ROOT}/models/g2p_en"
 mkdir -p "${RAW_DIR}/g2p_en"
 cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${RAW_DIR}/g2p_en/"
 
-OPT_ARGS=(--input-dir "${RAW_DIR}" --output-dir "${PATCHED_DIR}")
+OPT_ARGS=(--input-dir "${RAW_DIR}" --output-dir "${PATCHED_DIR}" --profile "${PROFILE}")
 if $NO_QUANT; then
     OPT_ARGS+=(--no-quant)
 fi
@@ -115,6 +141,11 @@ run_python "${ONNX_RS_ROOT}/scripts/optimize_aio.py" "${OPT_ARGS[@]}"
 mkdir -p "${PATCHED_DIR}/g2p_en"
 cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${PATCHED_DIR}/g2p_en/"
 
+if [[ -n "${REF_AUDIO}" ]]; then
+    cp "${REF_AUDIO}" "${RAW_DIR}/ref.wav"
+    cp "${REF_AUDIO}" "${PATCHED_DIR}/ref.wav"
+fi
+
 if [[ -n "${OUTPUT_DIR}" ]]; then
     mkdir -p "${OUTPUT_DIR}"
     rsync -a "${PATCHED_DIR}/" "${OUTPUT_DIR}/"
@@ -124,6 +155,7 @@ else
 fi
 
 if $SMOKE_TEST; then
+    [[ -n "${REF_TEXT}" ]] || die "--ref-text is required for a smoke test"
     require_cmd cargo
     local_model="${OUTPUT_DIR:-${PATCHED_DIR}}"
     log_info "Running Rust smoke test"
@@ -131,7 +163,7 @@ if $SMOKE_TEST; then
         cd "${ONNX_RS_ROOT}"
         cargo run --release --example gpt_sovits_demo -- \
             --model-path "${local_model}" \
-            --ref-text "你好，这是一段参考文本。" \
+            --ref-text "${REF_TEXT}" \
             --text "你好啊，这是一个测试。吃葡萄不吐葡萄皮，不吃葡萄倒吐葡萄皮。This demo is only for test  usage. If you find any 问题, 请修复它。"
     )
 fi

@@ -87,12 +87,15 @@ fn apply_repetition_penalty(logits: &mut [f32], previous_tokens: &[i64], penalty
     if penalty == 1.0 {
         return;
     }
-    // Match PyTorch gather/scatter over every prior token (including duplicates).
+    // PyTorch gather reads the original logits before scatter writes them.
+    // Duplicate indices therefore receive one penalty, not penalty.pow(count).
+    let mut seen = vec![false; logits.len()];
     for &token_id in previous_tokens {
         let idx = token_id as usize;
-        if idx >= logits.len() {
+        if idx >= logits.len() || seen[idx] {
             continue;
         }
+        seen[idx] = true;
         let logit = &mut logits[idx];
         if *logit >= 0.0 {
             *logit /= penalty;
@@ -326,5 +329,16 @@ mod tests {
         let mut sampler2 = Sampler::with_seed(42);
         let b = sampler2.sample(&mut l2, &[], &params);
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod repetition_tests {
+    use super::*;
+    #[test]
+    fn duplicate_tokens_receive_one_penalty_like_pytorch() {
+        let mut logits = [4.0, -4.0, 2.0];
+        apply_repetition_penalty(&mut logits, &[0, 0, 0, 1, 1, -1, 99], 2.0);
+        assert_eq!(logits, [2.0, -8.0, 2.0]);
     }
 }

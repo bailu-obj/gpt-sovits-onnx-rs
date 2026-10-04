@@ -3,21 +3,16 @@ sys.path.append('./')
 import torch
 import torchaudio
 from torch import nn
-from feature_extractor import cnhubert
 from text import cleaned_text_to_sequence
 import soundfile
 import os
 import json
-from transformers import AutoModelForMaskedLM, AutoTokenizer
 from module.models_onnx import SynthesizerTrn, symbols_v1, symbols_v2
-from AR.models.t2s_lightning_module_onnx import Text2SemanticLightningModule
 import argparse
 from torch import Tensor
 import torch.nn.functional as F
 
-from AR.models.t2s_model_onnx import sample
-from sv import SV
-import kaldi as Kaldi
+from torchaudio.compliance import kaldi as Kaldi
 from process_ckpt import get_sovits_version_from_path_fast
 
 V2PRO_SET = {"v2Pro", "v2ProPlus"}
@@ -43,6 +38,7 @@ sv_cn_model = None
 
 def init_sv_cn(device, is_half):
     global sv_cn_model
+    from sv import SV
     sv_cn_model = SV(device, is_half)
 
 EOS = 1024
@@ -113,6 +109,9 @@ class T2SEncoder(nn.Module):
 
 class T2SModel(nn.Module):
     def __init__(self, t2s_path, vits_model):
+        global sample
+        from AR.models.t2s_model_onnx import sample
+        from AR.models.t2s_lightning_module_onnx import Text2SemanticLightningModule
         super().__init__()
         dict_s1 = torch.load(t2s_path, map_location="cpu", weights_only=False)
         self.config = dict_s1["config"]
@@ -330,6 +329,7 @@ class GptSoVits(nn.Module):
 class SSLModel(nn.Module):
     def __init__(self):
         super().__init__()
+        from feature_extractor import cnhubert
         cnhubert_base_path = "GPT_SoVITS/pretrained_models/chinese-hubert-base"
         cnhubert.cnhubert_base_path = cnhubert_base_path
         self.ssl = cnhubert.get_model().model
@@ -340,7 +340,7 @@ class SSLModel(nn.Module):
 
 
 class ExportERes2NetV2(nn.Module): # SV model
-    def __init__(self, sv_cn_model: SV):
+    def __init__(self, sv_cn_model: "SV"):
         super(ExportERes2NetV2, self).__init__()
         self.bn1 = sv_cn_model.embedding_model.bn1
         self.conv1 = sv_cn_model.embedding_model.conv1
@@ -394,6 +394,7 @@ class MyBertModel(torch.nn.Module):
 
 
 def export_bert(project_name):
+    from transformers import AutoModelForMaskedLM, AutoTokenizer
     bert_path = os.environ.get(
         "bert_path", "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
     )
@@ -502,6 +503,26 @@ def export(vits_path, gpt_path, project_name, vits_model="v2"):
         json.dump(MoeVSConf, MoeVsConfFile, indent=4)
 
 
+
+def export_vits_only(vits_path, project_name, version):
+    """Refresh the vocoder from its checkpoint without touching T2S/text models."""
+    model = VitsModel(vits_path, version=version)
+    model.eval()
+    text = torch.zeros((1, 24), dtype=torch.long)
+    semantic = torch.zeros((1, 1, 160), dtype=torch.long)
+    reference = torch.zeros((1, model.hps.data.sampling_rate * 5))
+    inputs = (text, semantic, reference)
+    names = ["text_seq", "pred_semantic", "ref_audio"]
+    if is_v2pro(version):
+        inputs += (torch.zeros((1, 20480)),)
+        names.append("sv_emb")
+    os.makedirs(f"onnx/{project_name}", exist_ok=True)
+    torch.onnx.export(model, inputs, f"onnx/{project_name}/{project_name}_vits.onnx",
+        input_names=names, output_names=["audio"],
+        dynamic_axes={"text_seq": {1: "text_length"}, "pred_semantic": {2: "pred_length"},
+                      "ref_audio": {1: "audio_length"}},
+        opset_version=20, verbose=False, **_LEGACY_ONNX_KWARGS)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export model to ONNX")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model directory")
@@ -517,16 +538,22 @@ if __name__ == "__main__":
         action="store_true",
         help="detect version from sovits.pth via process_ckpt",
     )
+    parser.add_argument("--gpt-checkpoint", help="Override model_path/gpt.ckpt")
+    parser.add_argument("--sovits-checkpoint", help="Override model_path/sovits.pth")
+    parser.add_argument("--vits-only", action="store_true", help="Refresh only VITS from checkpoint")
     args = parser.parse_args()
 
     try:
         os.mkdir("onnx")
     except:
         pass
-    gpt_path = os.path.join(args.model_path, "gpt.ckpt")
-    vits_path = os.path.join(args.model_path, "sovits.pth")
+    gpt_path = args.gpt_checkpoint or os.path.join(args.model_path, "gpt.ckpt")
+    vits_path = args.sovits_checkpoint or os.path.join(args.model_path, "sovits.pth")
     version = resolve_version(vits_path, args.version, args.auto_version)
     with torch.no_grad():
-        export(vits_path, gpt_path, args.export_name, version)
+        if args.vits_only:
+            export_vits_only(vits_path, args.export_name, version)
+        else:
+            export(vits_path, gpt_path, args.export_name, version)
 
     # soundfile.write("out.wav", a, vits.hps.data.sampling_rate)

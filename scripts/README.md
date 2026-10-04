@@ -224,3 +224,25 @@ PYTHON_PREPROCESS_JSON=/tmp/python_preprocess.json cargo test preprocess_parity_
 ```
 
 语料：`resource/preprocess_corpus.json`。
+
+### Dynamic VITS lengths
+
+VITS semantic, text and reference masks must use runtime shape lengths. Legacy
+`torch.LongTensor([tensor.size(axis)])` exports freeze those values and cause
+periodic noise once the utterance exceeds the traced length. The patch uses
+`torch._shape_as_tensor`; `optimize_aio.py` repairs old full-length masks before
+optimization and verifies them afterward. `vits_dynamic.py INPUT --output OUTPUT`
+repairs an old FP32 export without quantizing its weights; omitting `--output`
+validates only. Repairing masks does not require changing ORT.
+
+For custom v2 checkpoints, `05_export.sh --version v2 --export-name custom_v2
+--model-path "$HOME/models/gpt-sovits-simple/kaoyu_v2"` accepts
+`kaoyu_gpt.ckpt` / `kaoyu_sovits.pth`. v2Pro defaults to the staged official
+`s1v3.ckpt` / `v2Pro/s2Gv2Pro.pth`. Use `--quant --profile quality` for text INT8
+weights with FP32 speech models, or `--profile compact` for the compact policy.
+Use an accurate `--ref-text` with `--ref-audio` when requesting `--smoke-test`.
+
+Regression checks: `python -m unittest discover -s scripts -p test_vits_dynamic.py`
+and `cargo test --release --lib`. Test audio longer than the original trace and
+verify every mask includes its entire runtime sequence; finite/nonzero PCM alone
+cannot detect periodic tail noise.
