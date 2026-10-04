@@ -24,6 +24,7 @@ mod error;
 mod infer_params;
 mod logits_sampler;
 mod onnx_builder;
+pub use onnx_builder::{OnnxSessionOptions, configure_onnx_sessions};
 mod postprocess;
 mod preprocessor;
 mod sv;

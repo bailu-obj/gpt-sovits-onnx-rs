@@ -228,6 +228,10 @@ Demo 支持 `--text`、`--ref-text`、`--top-k`、`--top-p`、`--temperature`、
 
 ## 嵌入应用的共享 ORT 线程池
 
+依赖统一为 `ort / ort-sys =2.0.0-rc.13`、`ndarray =0.17.2`。
+`knf-rs-sys` 使用 `bailu-obj/pyannote-rs` 的固定 Git revision，包含 Android
+ABI、bindgen 和 C++ 链接修复；不依赖外部应用的 Cargo patch。
+
 默认保留原有独立 session 线程池。需要由宿主统一线程预算时，可启用
 `shared-ort-pool` feature，在加载任何 ONNX 模型前初始化环境：
 
@@ -240,9 +244,22 @@ ort::init().with_global_thread_pool(pool).commit();
 // 此后再创建 TTSModel；Android 动态加载使用 ort::init_from(库绝对路径)。
 ```
 
-该 feature 让全部 GPT-SoVITS session 使用宿主的共享池并关闭等待自旋。
+该 feature 让全部 GPT-SoVITS session 使用宿主的共享池，默认关闭等待自旋。
 不改变模型图、采样或 PCM 输出。宿主应在 VAD 等其他 ORT 使用者之前初始化。
 线程数由宿主决定，上例的四线程不是硬件性能结论。
+
+等待自旋可在运行时配置；在创建任何模型之前调用：
+
+```rust
+gpt_sovits_onnx_rs::configure_onnx_sessions(
+    gpt_sovits_onnx_rs::OnnxSessionOptions { spinning: true },
+).expect("configure before loading models");
+```
+
+`spinning` 同时控制 session 的 intra-op / inter-op 等待自旋。
+独立池默认 `true`，共享池默认 `false`。首次创建 session 后配置冻结，
+重复配置返回错误。共享池的环境设置还需由宿主通过
+`GlobalThreadPoolOptions::with_spin_control` 设置为相同值。
 
 模型优化脚本按输出文件名判断模型类型；父目录名包含 `gpt-sovits`
 不会再使所有模型误入 VITS 分支而跳过量化。

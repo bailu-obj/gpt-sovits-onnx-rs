@@ -22,7 +22,7 @@ ort = { version = "=2.0.0-rc.13", features = [
 ] }
 arpabet = "2.0.0"
 jieba-rs = "0.7.2"
-ndarray = "0.17.2"
+ndarray = "=0.17.2"
 pinyin = "0.10.0"
 log = "0.4.25"
 hound = "3.5.1"
@@ -50,7 +50,7 @@ smallvec = "1.15"
 regex = "1.11"
 rubato = "0.16" # For audio resampling
 unicode-segmentation = "1.10.1"
-knf-rs-sys = "0.3.2"
+knf-rs-sys = { git = "https://github.com/bailu-obj/pyannote-rs.git", rev = "f9019f2572afef70f774af17284dfe2980f4f884" }
 
 [features]
 # Opt in when the host configures one global ORT pool before loading models.
