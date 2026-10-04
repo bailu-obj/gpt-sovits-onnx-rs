@@ -107,7 +107,7 @@ fi
 RAW_DIR="${GPT_SOVITS_ROOT}/onnx/${EXPORT_NAME}"
 PATCHED_DIR="${GPT_SOVITS_ROOT}/onnx-patched/${EXPORT_NAME}"
 
-EXPORT_ARGS=()
+EXPORT_ARGS=(--version "${VERSION}")
 if $VITS_ONLY; then EXPORT_ARGS+=(--vits-only); fi
 
 log_info "Exporting ONNX (${VERSION} -> ${EXPORT_NAME})"
@@ -117,7 +117,7 @@ log_info "Exporting ONNX (${VERSION} -> ${EXPORT_NAME})"
         --model_path "${MODEL_STAGE}" \
         --gpt-checkpoint "${GPT_CHECKPOINT}" --sovits-checkpoint "${SOVITS_CHECKPOINT}" \
         --export_name "${EXPORT_NAME}" \
-        --version "${VERSION}" "${EXPORT_ARGS[@]}"
+        "${EXPORT_ARGS[@]}"
 )
 
 G2PW_ONNX="${GPT_SOVITS_ROOT}/GPT_SoVITS/text/G2PWModel/g2pW.onnx"

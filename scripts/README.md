@@ -246,3 +246,9 @@ Regression checks: `python -m unittest discover -s scripts -p test_vits_dynamic.
 and `cargo test --release --lib`. Test audio longer than the original trace and
 verify every mask includes its entire runtime sequence; finite/nonzero PCM alone
 cannot detect periodic tail noise.
+
+`--vits-only` refreshes only the FP32 vocoder from the selected checkpoint, keeping
+existing T2S/text/speaker exports. Use it only when those exports already match
+the same checkpoint family. It avoids loading HuBERT, BERT and training metrics;
+full exports still load those dependencies normally. The VITS-only path has been
+verified with kaoyu v2 and the official v2Pro checkpoint.
