@@ -65,7 +65,7 @@ def process_model(file_path: str, output_path: str, use_quant: bool) -> str:
     """Process and optimize an ONNX model."""
     logger.info(f"Processing model: {file_path}")
     model = onnx.load(file_path)
-    output_lower = output_path.lower()
+    output_lower = os.path.basename(output_path).lower()
 
     # vits model may change and have issue in simplify
     if "vits" in output_lower:

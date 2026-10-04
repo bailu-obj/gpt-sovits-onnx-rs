@@ -13,8 +13,8 @@ required-features = ["jni"]
 
 
 [dependencies]
-ort-sys = { version = "=2.0.0-rc.12" } # https://github.com/pykeio/ort/issues/399
-ort = { version = "=2.0.0-rc.12", features = [
+ort-sys = { version = "=2.0.0-rc.13" } # https://github.com/pykeio/ort/issues/399
+ort = { version = "=2.0.0-rc.13", features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",
@@ -53,10 +53,12 @@ unicode-segmentation = "1.10.1"
 knf-rs-sys = "0.3.2"
 
 [features]
+# Opt in when the host configures one global ORT pool before loading models.
+shared-ort-pool = []
 jni = ["dep:jni"] # Enables JNI and dynamic ONNX loading for Android
 
 [target.'cfg(target_os = "android")'.dependencies]
-ort = { version = "2.0.0-rc.12", features = [
+ort = { version = "=2.0.0-rc.13", features = [
     "ndarray",
     "download-binaries",
     "copy-dylibs",
