@@ -2,6 +2,18 @@
 
 一个基于 **Rust** 和 **ONNX Runtime** 的轻量级、跨平台 GPT-SoVITS TTS 推理引擎，专为在 **x86/ARM** 架构的 **CPU** 上运行而设计。
 
+## 推荐模型：官方 v2Pro quality
+
+推荐从官方 `s1v3.ckpt` 与 `v2Pro/s2Gv2Pro.pth` 导出 v2Pro，使用 quality
+量化策略：仅 BERT/G2PW MatMul 权重 INT8，激活、T2S、VITS、SSL 和 SV 保持
+FP32。完整部署包含 `sv.onnx`，约 2.12 GiB；macOS 和 Android 使用同一套模型。
+参考音频应清晰、底噪低，并配准确转录。本次白露试听采用白露参考音频及
+`看起来是类似仓库的地方呢，呜…这里也臭烘烘的。`，效果由用户比较确认。
+
+Bailu 只部署 v2Pro quality，其他版本的模型不再作为 App 预设；本推理库仍
+支持 v2 / v2Pro / v2ProPlus 和其他量化策略。导出与量化步骤见
+[转换脚本说明](scripts/README.md)。动态长度掩码检查不可省略。
+
 ## 项目简介
 
 本项目旨在将 GPT-SoVITS (V2) 模型通过 ONNX Runtime 部署到各类 CPU 设备上，以实现低延迟、高可用的本地文本转语音（TTS）能力。它最初是为个人全平台 Chatbot 项目（尚未开源）的 Android 和 PC 端提供 TTS 支持而开发的。

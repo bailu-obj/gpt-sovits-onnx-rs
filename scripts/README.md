@@ -2,6 +2,14 @@
 
 本目录包含 GPT-SoVITS → ONNX 的转换与优化脚本。上游 ONNX 覆盖文件位于仓库根目录的 [`patch/GPT_SoVITS/`](../patch/GPT_SoVITS/)（对上游的 patch overlay，不是独立 Python 包）。
 
+## 推荐部署
+
+macOS / Android 推荐官方 **v2Pro + quality**。使用 `s1v3.ckpt` 和
+`v2Pro/s2Gv2Pro.pth`；BERT/G2PW 仅 MatMul 权重 INT8，T2S、VITS、SSL、SV
+及激活保持 FP32。模型约 2.12 GiB，必须部署 `sv.onnx`。
+Bailu 已统一使用这一版本与白露的清晰参考音频，不再部署 v2 或原始版比较包。
+参考文字必须与实际 WAV 匹配，不能沿用其他音频的默认转录。
+
 ## 目录结构
 
 | 路径 | 说明 |
@@ -49,7 +57,7 @@
 ./scripts/export/04_download_models.sh --version v2Pro
 
 # 5. 导出 ONNX（--version 与 --export-name 必填）
-./scripts/export/05_export.sh --version v2Pro --export-name custom --no-quant
+./scripts/export/05_export.sh --version v2Pro --export-name custom --quant --profile quality
 
 # V2ProPlus
 ./scripts/export/04_download_models.sh --version v2ProPlus
