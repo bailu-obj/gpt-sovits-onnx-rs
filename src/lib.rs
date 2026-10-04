@@ -563,6 +563,60 @@ impl TTSModel {
         Ok((spec, Box::pin(stream)))
     }
 
+    /// Sentence-level streaming: each item is a complete, postprocessed waveform.
+    /// VITS does not stream within a sentence. Polling the next item starts the
+    /// next sentence; dropping the stream stops subsequent inference.
+    pub async fn synthesize_sentence_chunks(
+        &mut self,
+        text: &str,
+        sampling_param: SamplingParams,
+        lang_id: LangId,
+        postprocess_params: PostprocessParams,
+    ) -> Result<
+        (
+            WavSpec,
+            impl Stream<Item = Result<Vec<f32>, GSVError>> + Send + Unpin,
+        ),
+        GSVError,
+    > {
+        let ref_data = self
+            .ref_data
+            .as_ref()
+            .ok_or_else(|| GSVError::from("Reference data not initialized"))?
+            .clone();
+        let spec = self.output_spec;
+        let fragments = self.text_processor.get_phone_and_bert(text, lang_id)?;
+        let stream = stream! {
+            for (text, seq, bert) in fragments {
+                match self.in_stream_once_gen(&text, &bert, &seq, &ref_data, sampling_param).await {
+                    Ok(samples) => yield Ok(audio_postprocess(
+                        vec![vec![samples]], spec.sample_rate, &postprocess_params, None,
+                    )),
+                    Err(error) => { yield Err(error); break; }
+                }
+            }
+        };
+        Ok((spec, Box::pin(stream)))
+    }
+
+    /// Blocking bridge with backpressure and cancellation between sentences.
+    /// Return false from `emit` to stop before another sentence is synthesized.
+    pub fn synthesize_sentences_sync(
+        &mut self,
+        text: &str,
+        sampling_param: SamplingParams,
+        lang_id: LangId,
+        postprocess_params: PostprocessParams,
+        emit: impl FnMut(WavSpec, Vec<f32>) -> bool,
+    ) -> Result<(), GSVError> {
+        Self::run_async_in_context(async {
+            let (spec, chunks) = self
+                .synthesize_sentence_chunks(text, sampling_param, lang_id, postprocess_params)
+                .await?;
+            emit_sentence_chunks(spec, chunks, emit).await
+        })
+    }
+
     async fn in_stream_once_gen(
         &mut self,
         _text: &str,
@@ -734,6 +788,71 @@ impl TTSModel {
             }
             Ok((spec, samples))
         })
+    }
+}
+
+async fn emit_sentence_chunks(
+    spec: WavSpec,
+    mut chunks: impl Stream<Item = Result<Vec<f32>, GSVError>> + Unpin,
+    mut emit: impl FnMut(WavSpec, Vec<f32>) -> bool,
+) -> Result<(), GSVError> {
+    while let Some(chunk) = chunks.next().await {
+        if !emit(spec, chunk?) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sentence_stream_tests {
+    use super::*;
+    #[tokio::test]
+    async fn stopping_after_first_sentence_does_not_poll_next_inference() {
+        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = produced.clone();
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 32000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let chunks = stream! {
+            for n in 1..=3 { counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed); yield Ok(vec![n as f32]); }
+        };
+        emit_sentence_chunks(spec, Box::pin(chunks), |_, samples| {
+            assert_eq!(samples, [1.0]);
+            false
+        })
+        .await
+        .unwrap();
+        assert_eq!(produced.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+    #[tokio::test]
+    async fn sentence_order_and_errors_are_preserved() {
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 32000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let chunks = futures::stream::iter(vec![
+            Ok(vec![1.0, 2.0]),
+            Ok(vec![3.0]),
+            Err(GSVError::from("failed sentence")),
+            Ok(vec![4.0]),
+        ]);
+        let mut actual = Vec::new();
+        assert!(
+            emit_sentence_chunks(spec, chunks, |s, samples| {
+                assert_eq!(s.sample_rate, 32000);
+                actual.push(samples);
+                true
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(actual, [vec![1.0, 2.0], vec![3.0]]);
     }
 }
 
