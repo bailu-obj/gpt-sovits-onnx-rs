@@ -11,8 +11,10 @@ NO_QUANT=true
 OUTPUT_DIR=""
 SMOKE_TEST=false
 VITS_ONLY=false
+SHARED_KV=false
 MODEL_PATH=""
 PROFILE="quality"
+VITS_CALIBRATION_DIR=""
 REF_AUDIO=""
 REF_TEXT=""
 TEXT=""
@@ -28,14 +30,16 @@ Options:
   --export-name NAME      Required: output bundle name (e.g. v2pro)
   --gpt-sovits-dir PATH   Upstream clone path
   --vits-only             Refresh VITS only; existing speech/text exports required
+  --shared-kv             Export the T2S step decoder with reusable CPU KV buffers
   --model-path PATH       Checkpoint directory (default: staged official models)
-  --profile PROFILE       quality (default) or compact quantization
+  --profile PROFILE       quality (default), compact, rtf, or mobile
+  --vits-calibration-dir PATH  Mobile VITS INT8 calibration inputs (.npz)
   --ref-audio PATH        Reference WAV to copy into the bundle
   --ref-text TEXT         Accurate reference transcription (required for smoke test)
   --text TEXT             Text to synthesize (required for smoke test)
   --output-dir PATH       Copy/symlink final bundle here (optional)
-  --no-quant              Disable INT8 quantization (default)
-  --quant                 Enable INT8 quantization
+  --no-quant              Export floating-point models (default)
+  --quant                 Apply the selected quantization profile
   --smoke-test            Run cargo gpt_sovits_demo after export (needs ref.wav)
   -h, --help              Show this help
 EOF
@@ -44,8 +48,10 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --vits-only) VITS_ONLY=true; shift ;;
+    --shared-kv) SHARED_KV=true; shift ;;
     --model-path) MODEL_PATH="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
+    --vits-calibration-dir) VITS_CALIBRATION_DIR="$2"; shift 2 ;;
     --ref-audio) REF_AUDIO="$2"; shift 2 ;;
     --ref-text) REF_TEXT="$2"; shift 2 ;;
     --text) TEXT="$2"; shift 2 ;;
@@ -96,7 +102,14 @@ require_clone
 resolve_env_manager
 
 MODEL_STAGE="${MODEL_PATH:-${GPT_SOVITS_ROOT}/models/export/${VERSION}}"
-[[ "${PROFILE}" == quality || "${PROFILE}" == compact ]] || die "Invalid profile"
+case "${PROFILE}" in
+    quality|compact|rtf|mobile) ;;
+    *) die "Choose a profile from quality, compact, rtf, and mobile" ;;
+esac
+if [[ -n "${VITS_CALIBRATION_DIR}" ]]; then
+    [[ "${PROFILE}" == mobile && "${NO_QUANT}" == false ]] || die "VITS calibration requires --quant --profile mobile"
+    [[ -d "${VITS_CALIBRATION_DIR}" ]] || die "Calibration directory missing: ${VITS_CALIBRATION_DIR}"
+fi
 GPT_CHECKPOINT="${MODEL_STAGE}/gpt.ckpt"
 SOVITS_CHECKPOINT="${MODEL_STAGE}/sovits.pth"
 if [[ ! -f "${GPT_CHECKPOINT}" && -f "${MODEL_STAGE}/kaoyu_gpt.ckpt" ]]; then
@@ -112,6 +125,7 @@ PATCHED_DIR="${GPT_SOVITS_ROOT}/onnx-patched/${EXPORT_NAME}"
 
 EXPORT_ARGS=(--version "${VERSION}")
 if $VITS_ONLY; then EXPORT_ARGS+=(--vits-only); fi
+if $SHARED_KV; then EXPORT_ARGS+=(--shared-kv); fi
 
 log_info "Exporting ONNX (${VERSION} -> ${EXPORT_NAME})"
 (
@@ -136,6 +150,9 @@ cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${RAW_
 OPT_ARGS=(--input-dir "${RAW_DIR}" --output-dir "${PATCHED_DIR}" --profile "${PROFILE}")
 if $NO_QUANT; then
     OPT_ARGS+=(--no-quant)
+fi
+if [[ -n "${VITS_CALIBRATION_DIR}" ]]; then
+    OPT_ARGS+=(--vits-calibration-dir "${VITS_CALIBRATION_DIR}")
 fi
 
 log_info "Running optimize_aio.py"

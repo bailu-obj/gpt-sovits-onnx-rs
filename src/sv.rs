@@ -2,6 +2,7 @@ use log::debug;
 use ndarray::Array2;
 use ndarray::ArrayD;
 use ort::{inputs, session::Session, value::TensorRef};
+use std::time::Instant;
 
 use crate::GSVError;
 
@@ -62,9 +63,11 @@ impl SvModel {
         debug!("SV features shape: {:?}", features.shape());
         let input_features = TensorRef::from_array_view(features.view());
 
+        let started = Instant::now();
         let outputs = self.sv_session.run(inputs![
             "audio_feature" => input_features?,
         ])?;
+        debug!("SV inference time: {:?}", started.elapsed());
 
         let output_tensor = outputs["sv_emb"].try_extract_array::<f32>()?.into_owned();
 

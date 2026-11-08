@@ -38,9 +38,26 @@ class DynamicMaskTests(unittest.TestCase):
         m=graph();del m.graph.node[-1]
         with self.assertRaisesRegex(ValueError,'expected 3'):repair_vits_masks(m)
 
+    def test_unpadded_export_declares_absence_of_masks(self):
+        m = graph()
+        m.metadata_props.add(key="vits.unpadded", value="1")
+        with self.assertRaisesRegex(ValueError, "unexpected masks"):
+            validate_vits_masks(m)
+        del m.graph.node[:]
+        self.assertEqual(validate_vits_masks(m), [])
+
     def test_reject_static_range(self):
         m=graph();m.graph.node[2].input[1]='pred_semanticone'
         with self.assertRaisesRegex(ValueError,'not dynamic'):repair_vits_masks(m)
+
+    def test_ignore_nested_relative_attention_bounds(self):
+        m = graph()
+        m.graph.node.append(h.make_node(
+            "Less", ["text_seqzero", "text_seqone"], ["attention_bound"],
+            name="/vq_model/enc_p/encoder_ssl/attn_layers.0/Less",
+        ))
+        self.assertEqual(len(repair_vits_masks(m)), 3)
+        self.assertEqual(len(validate_vits_masks(m)), 3)
 
 
 if __name__=='__main__':unittest.main()

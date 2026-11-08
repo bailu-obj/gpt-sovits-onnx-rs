@@ -1,5 +1,5 @@
 // text/en/g2p_en.rs
-use std::{collections::HashMap, path::Path, str::FromStr};
+use std::{collections::HashMap, path::Path, str::FromStr, time::Instant};
 
 use anyhow::{Ok, Result};
 use arpabet::Arpabet;
@@ -74,11 +74,14 @@ impl G2PEnModel {
             Tensor::from_array(Array::from_shape_vec((1, input_id_len), input_ids.clone())?)?;
         let attention_mask_tensor =
             Tensor::from_array(Array::from_elem((1, input_id_len), 1 as i64))?;
+        let started = Instant::now();
         let encoder_outputs = self.encoder_model.run(inputs![
             "input_ids" => &input_ids_tensor,
             "attention_mask" => &attention_mask_tensor
         ])?;
+        debug!("English G2P encoder time: {:?}", started.elapsed());
 
+        let started = Instant::now();
         for _ in 0..50 {
             let encoder_output = encoder_outputs["last_hidden_state"].view();
 
@@ -109,6 +112,7 @@ impl G2PEnModel {
                 break;
             }
         }
+        debug!("English G2P decoder time: {:?}", started.elapsed());
 
         let decoder_input_ids = decoder_input_ids
             .iter()

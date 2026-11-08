@@ -3,11 +3,11 @@ use futures::{Stream, StreamExt};
 use hound::{WavReader, WavSpec};
 use log::{debug, info};
 use ndarray::{
-    Array, Array1, Array2, ArrayBase, ArrayD, ArrayView2, Axis, IxDyn, OwnedRepr, concatenate, s,
+    Array1, Array2, ArrayBase, ArrayD, ArrayView2, Axis, IxDyn, OwnedRepr, concatenate, s,
 };
 use ort::{
     inputs,
-    session::{Session, SessionInputValue},
+    session::{Session, SessionInputValue, SessionOutputs},
     value::TensorRef,
 };
 use rubato::{
@@ -28,6 +28,7 @@ pub use onnx_builder::{OnnxSessionOptions, configure_onnx_sessions};
 mod postprocess;
 mod preprocessor;
 mod sv;
+mod t2s_cache;
 
 use onnx_builder::create_onnx_cpu_session;
 pub use postprocess::{PostprocessParams, audio_postprocess, recovery_order};
@@ -37,6 +38,7 @@ pub use preprocessor::{TextProcessor, bert, en, phoneme_finalize, text_normalize
 
 use logits_sampler::Sampler;
 use preprocessor::{bert::BertModel, en::g2p_en::G2pEn, zh::g2pw::G2PW};
+use t2s_cache::{CACHE_RESERVE, CacheLayout, LayerCache, SharedKvCache};
 
 pub use error::GSVError;
 pub use infer_params::InferParams;
@@ -47,6 +49,7 @@ use crate::{onnx_builder::BIG_CORES, sv::SvModel};
 const T2S_DECODER_EOS: i64 = 1024;
 const VOCAB_SIZE: usize = 1025;
 const DEFAULT_NUM_LAYERS: usize = 24;
+const MAX_DECODER_STEPS: usize = 1501;
 /// Product of VITS `upsample_rates` for v2 / v2Pro / v2ProPlus (`[10, 8, 2, 2, 2]`).
 const VITS_UPSAMPLE_RATE: usize = 640;
 
@@ -55,8 +58,6 @@ const VITS_UPSAMPLE_RATE: usize = 640;
 fn vits_output_samples(semantic_token_count: usize) -> usize {
     semantic_token_count * 2 * VITS_UPSAMPLE_RATE
 }
-
-type KvDType = f32;
 
 static STANDALONE_TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -77,6 +78,20 @@ fn t2s_kv_io_names(num_layers: usize) -> (Vec<String>, Vec<String>, Vec<String>,
     (ik, iv, k, v)
 }
 
+fn take_kv_pair(
+    output: &mut SessionOutputs<'_>,
+    key: &str,
+    value: &str,
+) -> Result<LayerCache, GSVError> {
+    let key = output
+        .remove(key)
+        .ok_or_else(|| GSVError::from(format!("Missing T2S decoder output {key}")))?;
+    let value = output
+        .remove(value)
+        .ok_or_else(|| GSVError::from(format!("Missing T2S decoder output {value}")))?;
+    Ok((key, value))
+}
+
 #[derive(Clone)]
 pub struct ReferenceData {
     ref_seq: Array2<i64>,
@@ -93,6 +108,7 @@ pub struct TTSModel {
     t2s_encoder: Session,
     t2s_fs_decoder: Session,
     t2s_s_decoder: Session,
+    t2s_shared_layout: Option<CacheLayout>,
     sv: Option<SvModel>,
     ref_data: Option<Arc<ReferenceData>>,
     t2s_dec_ik: Vec<String>,
@@ -102,12 +118,6 @@ pub struct TTSModel {
     num_layers: usize,
     output_spec: WavSpec,
 }
-
-// --- KV Cache Configuration ---
-/// Initial size for the sequence length of the KV cache.
-const INITIAL_CACHE_SIZE: usize = 2048;
-/// How much to increment the KV cache size by when reallocating.
-const CACHE_REALLOC_INCREMENT: usize = 1024;
 
 impl TTSModel {
     /// create new tts instance
@@ -153,6 +163,7 @@ impl TTSModel {
         };
 
         let t2s_s_decoder = create_onnx_cpu_session(t2s_s_decoder_path)?;
+        let t2s_shared_layout = CacheLayout::from_decoder(&t2s_s_decoder)?;
         let num_layers = t2s_num_layers_from_session(&t2s_s_decoder);
         info!("T2S decoder num_layers: {}", num_layers);
 
@@ -170,6 +181,7 @@ impl TTSModel {
             t2s_encoder: create_onnx_cpu_session(t2s_encoder_path)?,
             t2s_fs_decoder: create_onnx_cpu_session(t2s_fs_decoder_path)?,
             t2s_s_decoder,
+            t2s_shared_layout,
             sv: match sv_path {
                 Some(p) => Some(SvModel::new(create_onnx_cpu_session(p)?)),
                 None => None,
@@ -358,64 +370,79 @@ impl TTSModel {
         }))
     }
 
-    /// Efficiently runs the streaming decoder loop with a pre-allocated, resizable KV cache.
+    /// Run either the legacy growing decoder or the head-major shared-cache export.
     fn run_t2s_s_decoder_loop(
         &mut self,
         sampler: &mut Sampler,
         sampling_param: SamplingParams,
         mut y_vec: Vec<i64>,
-        mut k_caches: Vec<ArrayBase<OwnedRepr<KvDType>, IxDyn>>,
-        mut v_caches: Vec<ArrayBase<OwnedRepr<KvDType>, IxDyn>>,
+        mut caches: Vec<LayerCache>,
         prefix_len: usize,
-        initial_valid_len: usize,
     ) -> Result<ArrayBase<OwnedRepr<i64>, IxDyn>, GSVError> {
         let mut idx = 0;
-        let mut valid_len = initial_valid_len;
         y_vec.reserve(2048);
 
         let y_len_arr = Array1::from_elem(1, prefix_len as i64);
         let mut idx_arr = Array1::from_elem(1, 0i64);
         let mut logits_scratch = Vec::with_capacity(VOCAB_SIZE + 2);
+        let mut prefill_length = 0;
+        let mut shared = if let Some(layout) = self.t2s_shared_layout {
+            let key = &caches
+                .first()
+                .ok_or_else(|| GSVError::from("missing T2S prefill caches"))?
+                .0;
+            prefill_length = layout.prefill_length(key)?;
+            let cache = SharedKvCache::new(
+                &self.t2s_s_decoder,
+                layout,
+                &caches,
+                prefill_length,
+                prefill_length + CACHE_RESERVE,
+                VOCAB_SIZE,
+            )?;
+            caches.clear();
+            Some(cache)
+        } else {
+            None
+        };
 
         loop {
-            idx_arr[0] = idx as i64;
-
-            let iy = TensorRef::from_array_view(unsafe {
-                ArrayView2::from_shape_ptr((1, y_vec.len()), y_vec.as_ptr())
-            })
-            .unwrap();
-
-            let mut run_inputs: Vec<(Cow<'_, str>, SessionInputValue<'_>)> = vec![
-                (Cow::Borrowed("iy"), iy.into()),
-                (
-                    Cow::Borrowed("y_len"),
-                    TensorRef::from_array_view(y_len_arr.view()).unwrap().into(),
-                ),
-                (
-                    Cow::Borrowed("idx"),
-                    TensorRef::from_array_view(idx_arr.view()).unwrap().into(),
-                ),
-            ];
-
-            for i in 0..self.num_layers {
-                let k_view = k_caches[i].slice(s![.., 0..valid_len, ..]);
-                let v_view = v_caches[i].slice(s![.., 0..valid_len, ..]);
-
-                run_inputs.push((
-                    Cow::Borrowed(self.t2s_dec_ik[i].as_str()),
-                    TensorRef::from_array_view(k_view)?.into(),
-                ));
-                run_inputs.push((
-                    Cow::Borrowed(self.t2s_dec_iv[i].as_str()),
-                    TensorRef::from_array_view(v_view)?.into(),
-                ));
-            }
-
-            let mut output = self.t2s_s_decoder.run(run_inputs)?;
+            let old_capacity = shared.as_ref().map(|cache| cache.capacity);
+            let filled = prefill_length + idx + 1;
+            let mut output = if let Some(cache) = &mut shared {
+                cache.run(
+                    &mut self.t2s_s_decoder,
+                    *y_vec.last().unwrap(),
+                    (prefix_len + idx) as i64,
+                    filled - 1,
+                )?
+            } else {
+                idx_arr[0] = idx as i64;
+                let iy =
+                    TensorRef::from_array_view(ArrayView2::from_shape((1, y_vec.len()), &y_vec)?)?;
+                let mut run_inputs: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
+                    Vec::with_capacity(3 + 2 * caches.len());
+                run_inputs.extend([
+                    (Cow::Borrowed("iy"), iy.into()),
+                    (
+                        Cow::Borrowed("y_len"),
+                        TensorRef::from_array_view(y_len_arr.view())?.into(),
+                    ),
+                    (
+                        Cow::Borrowed("idx"),
+                        TensorRef::from_array_view(idx_arr.view())?.into(),
+                    ),
+                ]);
+                for (i, (key, value)) in caches.iter().enumerate() {
+                    run_inputs.push((Cow::Borrowed(self.t2s_dec_ik[i].as_str()), key.into()));
+                    run_inputs.push((Cow::Borrowed(self.t2s_dec_iv[i].as_str()), value.into()));
+                }
+                self.t2s_s_decoder.run(run_inputs)?
+            };
 
             {
-                let mut logits_arr = output["logits"].try_extract_array_mut::<f32>()?;
-                let src = logits_arr.as_slice_mut().unwrap();
+                let logits = output["logits"].try_extract_array::<f32>()?;
+                let src = logits.as_slice().unwrap();
                 logits_scratch.clear();
                 if idx < 11 {
                     let keep = src.len().saturating_sub(1);
@@ -430,67 +457,10 @@ impl TTSModel {
 
             let argmax = logits_sampler::argmax(&logits_scratch);
 
-            // --- 3. Check for reallocation and update caches ---
-            let new_valid_len = valid_len + 1;
-
-            // Check if we need to reallocate BEFORE writing to the new index.
-            if new_valid_len > k_caches[0].shape()[1] {
-                info!(
-                    "Reallocating KV cache from {} to {}",
-                    k_caches[0].shape()[1],
-                    k_caches[0].shape()[1] + CACHE_REALLOC_INCREMENT
-                );
-                for i in 0..self.num_layers {
-                    let old_k = &k_caches[i];
-                    let old_v = &v_caches[i];
-
-                    // Create new, larger arrays
-                    let mut new_k_dims = old_k.raw_dim().clone();
-                    new_k_dims[1] += CACHE_REALLOC_INCREMENT;
-                    let mut new_v_dims = old_v.raw_dim().clone();
-                    new_v_dims[1] += CACHE_REALLOC_INCREMENT;
-
-                    let mut new_k = Array::zeros(new_k_dims);
-                    let mut new_v = Array::zeros(new_v_dims);
-
-                    // Copy existing valid data to the new arrays
-                    new_k
-                        .slice_mut(s![.., 0..valid_len, ..])
-                        .assign(&old_k.slice(s![.., 0..valid_len, ..]));
-                    new_v
-                        .slice_mut(s![.., 0..valid_len, ..])
-                        .assign(&old_v.slice(s![.., 0..valid_len, ..]));
-
-                    // Replace the old caches with the new, larger ones
-                    k_caches[i] = new_k;
-                    v_caches[i] = new_v;
-                }
-            }
-
-            // Update KV caches by pasting the newly generated slice of data
-            for i in 0..self.num_layers {
-                let inc_k_cache =
-                    output[self.t2s_k_cache_out[i].as_str()].try_extract_array::<KvDType>()?;
-                let inc_v_cache =
-                    output[self.t2s_v_cache_out[i].as_str()].try_extract_array::<KvDType>()?;
-
-                // The new data is the last row of the incremental output from the model
-                let k_new_slice = inc_k_cache.slice(s![.., valid_len, ..]);
-                let v_new_slice = inc_v_cache.slice(s![.., valid_len, ..]);
-
-                // Paste the new row into our long-running cache at the correct position
-                k_caches[i]
-                    .slice_mut(s![.., valid_len, ..])
-                    .assign(&k_new_slice);
-                v_caches[i]
-                    .slice_mut(s![.., valid_len, ..])
-                    .assign(&v_new_slice);
-            }
-
-            // --- 4. Update valid length and check stop condition ---
-            valid_len = new_valid_len;
-
-            if idx >= 1500 || sampled == T2S_DECODER_EOS || argmax == T2S_DECODER_EOS {
+            if idx + 1 >= MAX_DECODER_STEPS
+                || sampled == T2S_DECODER_EOS
+                || argmax == T2S_DECODER_EOS
+            {
                 let sliced = logits_sampler::extract_semantic_tokens(&y_vec, prefix_len, idx);
                 debug!(
                     "t2s final len: {}, prefix_len: {}, stop_idx: {}",
@@ -500,6 +470,37 @@ impl TTSModel {
                 );
                 let y = ArrayD::from_shape_vec(IxDyn(&[1, 1, sliced.len()]), sliced)?;
                 return Ok(y);
+            }
+
+            if old_capacity.is_none() {
+                for (i, cache) in caches.iter_mut().enumerate() {
+                    *cache = take_kv_pair(
+                        &mut output,
+                        &self.t2s_k_cache_out[i],
+                        &self.t2s_v_cache_out[i],
+                    )?;
+                }
+            } else if old_capacity == Some(filled) {
+                let next = (0..self.num_layers)
+                    .map(|i| {
+                        take_kv_pair(
+                            &mut output,
+                            &self.t2s_k_cache_out[i],
+                            &self.t2s_v_cache_out[i],
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                drop(output);
+                let capacity =
+                    prefill_length + (2 * (filled - prefill_length)).min(MAX_DECODER_STEPS);
+                shared = Some(SharedKvCache::new(
+                    &self.t2s_s_decoder,
+                    self.t2s_shared_layout.unwrap(),
+                    &next,
+                    filled,
+                    capacity,
+                    VOCAB_SIZE,
+                )?);
             }
             idx += 1;
         }
@@ -652,9 +653,9 @@ impl TTSModel {
 
         let bert = bert.insert_axis(Axis(0)).to_owned();
 
-        let (y_vec, k_caches, v_caches, initial_seq_len) = {
+        let caches = {
             let time = SystemTime::now();
-            let fs_decoder_output = self.t2s_fs_decoder.run(inputs![
+            let mut fs_decoder_output = self.t2s_fs_decoder.run(inputs![
                 "x" => TensorRef::from_array_view(&x.as_standard_layout())?,
                 "prompts" => TensorRef::from_array_view(&prompts)?,
                 "bert" => TensorRef::from_array_view(&bert.as_standard_layout())?,
@@ -665,41 +666,6 @@ impl TTSModel {
                 .try_extract_array::<f32>()?
                 .into_owned();
 
-            // --- Initialize large KV Caches ---
-            // Get shape and initial data from the first-pass decoder.
-            let k_init_first = fs_decoder_output[self.t2s_k_cache_out[0].as_str()]
-                .try_extract_array::<KvDType>()?;
-            let initial_dims_dyn = k_init_first.raw_dim();
-            let initial_seq_len = initial_dims_dyn[1];
-
-            // Define the shape for our large, pre-allocated cache.
-            let mut large_cache_dims = initial_dims_dyn.clone();
-            large_cache_dims[1] = INITIAL_CACHE_SIZE;
-
-            let mut k_caches = Vec::with_capacity(self.num_layers);
-            let mut v_caches = Vec::with_capacity(self.num_layers);
-
-            for i in 0..self.num_layers {
-                let k_init = fs_decoder_output[self.t2s_k_cache_out[i].as_str()]
-                    .try_extract_array::<KvDType>()?;
-                let v_init = fs_decoder_output[self.t2s_v_cache_out[i].as_str()]
-                    .try_extract_array::<KvDType>()?;
-
-                // Create large, zero-initialized caches.
-                let mut k_large = Array::zeros(large_cache_dims.clone());
-                let mut v_large = Array::zeros(large_cache_dims.clone());
-
-                // Copy the initial data from the first-pass decoder into the start of our large caches.
-                k_large
-                    .slice_mut(s![.., 0..initial_seq_len, ..])
-                    .assign(&k_init);
-                v_large
-                    .slice_mut(s![.., 0..initial_seq_len, ..])
-                    .assign(&v_init);
-
-                k_caches.push(k_large);
-                v_caches.push(v_large);
-            }
             let (logits, _) = logits.into_raw_vec_and_offset();
             let mut logits_scratch = Vec::with_capacity(logits.len());
             // First fs_decoder sample matches s_decoder idx=0 (mask EOS logit).
@@ -707,19 +673,20 @@ impl TTSModel {
             logits_scratch.extend_from_slice(&logits[..keep]);
             let sampling_rst = sampler.sample(&mut logits_scratch, &y_vec, &sampling_param);
             y_vec.push(sampling_rst);
-            (y_vec, k_caches, v_caches, initial_seq_len)
+            (0..self.num_layers)
+                .map(|i| {
+                    take_kv_pair(
+                        &mut fs_decoder_output,
+                        &self.t2s_k_cache_out[i],
+                        &self.t2s_v_cache_out[i],
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         let time = SystemTime::now();
-        let pred_semantic = self.run_t2s_s_decoder_loop(
-            &mut sampler,
-            sampling_param,
-            y_vec,
-            k_caches,
-            v_caches,
-            prefix_len,
-            initial_seq_len,
-        )?;
+        let pred_semantic =
+            self.run_t2s_s_decoder_loop(&mut sampler, sampling_param, y_vec, caches, prefix_len)?;
         debug!("T2S S Decoder all time: {:?}", time.elapsed()?);
 
         let time = SystemTime::now();

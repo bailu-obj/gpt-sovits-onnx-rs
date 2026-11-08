@@ -1,4 +1,4 @@
-use std::{path::Path, str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr, sync::Arc, time::Instant};
 
 use anyhow::Ok;
 use log::{debug, warn};
@@ -81,7 +81,9 @@ impl BertModel {
             "token_type_ids" => Tensor::from_array(Array2::from_shape_vec((1, token_type_ids.len()), token_type_ids).unwrap()).unwrap()
         ];
 
+        let started = Instant::now();
         let bert_out = session.run(inputs)?;
+        debug!("BERT inference time: {:?}", started.elapsed());
         let bert_feature = bert_out["bert_feature"]
             .try_extract_array::<f32>()?
             .to_owned();

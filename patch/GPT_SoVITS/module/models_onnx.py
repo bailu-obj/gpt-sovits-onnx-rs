@@ -204,6 +204,15 @@ class TextEncoder(nn.Module):
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
     def forward(self, y, y_lengths, text, text_lengths, ge, speed=1):
+        if y_lengths is None and text_lengths is None:
+            y = self.encoder_ssl(self.ssl_proj(y), None)
+            text = self.encoder_text(self.text_embedding(text).transpose(1, 2), None)
+            y = self.encoder2(self.mrte(y, None, text, None, ge), None)
+            if speed != 1:
+                y = F.interpolate(y, scale_factor=1.0 / speed, mode="linear")
+            m, logs = self.proj(y).split(self.out_channels, dim=1)
+            return y, m, logs, None
+
         y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, y.size(2)), 1).to(y.dtype)
 
         y = self.ssl_proj(y * y_mask) * y_mask
@@ -379,6 +388,46 @@ class WNEncoder(nn.Module):
         return out
 
 
+class PolyphaseUpsample(nn.Module):
+    """Export strided transposed convolution as packed low-rate convolution."""
+
+    def __init__(self, layer):
+        super().__init__()
+        self.stride = layer.stride[0]
+        self.channels = layer.out_channels
+        padding = layer.padding[0]
+        kernel = layer.kernel_size[0]
+        width = (kernel + self.stride - 1) // self.stride
+        last_steps = [(kernel - 1 - phase - padding) // self.stride for phase in range(self.stride)]
+        self.left = last_steps[0]
+        self.right = width - 1 - last_steps[-1]
+        self.first_phases = last_steps.count(self.left)
+
+        weights = layer.weight.detach()
+        packed = weights.new_zeros(self.channels, self.stride, layer.in_channels, width)
+        for phase, last_step in enumerate(last_steps):
+            # Output at m*stride+phase uses input at m-step for this tap.
+            for tap in range((phase + padding) % self.stride, kernel, self.stride):
+                step = (tap - phase - padding) // self.stride
+                packed[:, phase, :, last_step - step] = weights[:, :, tap].T
+        self.register_buffer("weight", packed.flatten(0, 1))
+        bias = None if layer.bias is None else layer.bias.detach().repeat_interleave(self.stride)
+        self.register_buffer("bias", bias)
+
+    def forward(self, x):
+        batch, length = x.shape[0], x.shape[-1]
+        packed = F.conv1d(F.pad(x, (self.left, self.right)), self.weight, self.bias)
+        phases = packed.view(batch, self.channels, self.stride, -1)
+        # Later phases can start one low-rate frame after the first group.
+        if self.first_phases < self.stride:
+            phases = torch.cat(
+                (phases[:, :, :self.first_phases, :length],
+                 phases[:, :, self.first_phases:, 1:length + 1]),
+                dim=2,
+            )
+        return phases.transpose(2, 3).reshape(batch, self.channels, -1)
+
+
 class Generator(torch.nn.Module):
     def __init__(
         self,
@@ -451,6 +500,12 @@ class Generator(torch.nn.Module):
             remove_weight_norm(l)
         for l in self.resblocks:
             l.remove_weight_norm()
+
+    def pack_upsamples_for_export(self):
+        for index, layer in enumerate(self.ups):
+            if (layer.groups == 1 and layer.dilation == (1,) and layer.output_padding == (0,)
+                    and layer.kernel_size[0] - 2 * layer.padding[0] == layer.stride[0]):
+                self.ups[index] = PolyphaseUpsample(layer)
 
 
 class DiscriminatorP(torch.nn.Module):
@@ -876,13 +931,8 @@ class SynthesizerTrn(nn.Module):
             self.prelu = nn.PReLU(num_parameters=gin_channels)
 
     def forward(self, codes, text, refer, noise_scale=0.5, speed=1, sv_emb=None):
-        # Keep shape-derived lengths in the ONNX graph; LongTensor([size]) freezes them.
-        refer_lengths = torch._shape_as_tensor(refer)[2].reshape(1).to(refer.device)
-        refer_mask = torch.unsqueeze(commons.sequence_mask(refer_lengths, refer.size(2)), 1).to(refer.dtype)
-        if self.version == "v1":
-            ge = self.ref_enc(refer * refer_mask, refer_mask)
-        else:
-            ge = self.ref_enc(refer[:, :704] * refer_mask, refer_mask)
+        # This inference interface receives a single unpadded utterance.
+        ge = self.ref_enc(refer if self.version == "v1" else refer[:, :704])
         if self.is_v2pro:
             sv_emb = self.sv_emb(sv_emb)
             ge += sv_emb.unsqueeze(-1)
@@ -892,24 +942,13 @@ class SynthesizerTrn(nn.Module):
         if self.semantic_frame_rate == "25hz":
             quantized = F.interpolate(quantized, scale_factor=2.0, mode="nearest")
 
-        y_lengths = torch._shape_as_tensor(quantized)[2].reshape(1).to(codes.device)
-        text_lengths = torch._shape_as_tensor(text)[1].reshape(1).to(codes.device)
-
-        if self.is_v2pro:
-            ge_ = self.ge_to512(ge.transpose(2, 1)).transpose(2, 1)
-            x, m_p, logs_p, y_mask = self.enc_p(
-                quantized, y_lengths, text, text_lengths, ge_, speed
-            )
-        else:
-            x, m_p, logs_p, y_mask = self.enc_p(
-                quantized, y_lengths, text, text_lengths, ge, speed
-            )
+        ge_text = self.ge_to512(ge.transpose(2, 1)).transpose(2, 1) if self.is_v2pro else ge
+        _, m_p, logs_p, _ = self.enc_p(quantized, None, text, None, ge_text, speed)
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
 
-        z = self.flow(z_p, y_mask, g=ge, reverse=True)
-
-        o = self.dec((z * y_mask)[:, :, :], g=ge)
+        z = self.flow(z_p, z_p.new_ones((1, 1, 1)), g=ge, reverse=True)
+        o = self.dec(z, g=ge)
         return o[:, 0, :]
 
     def extract_latent(self, x):

@@ -8,6 +8,7 @@ import soundfile
 import os
 import json
 from module.models_onnx import SynthesizerTrn, symbols_v1, symbols_v2
+from module.attentions_onnx import MultiHeadAttention
 import argparse
 from torch import Tensor
 import torch.nn.functional as F
@@ -19,6 +20,26 @@ V2PRO_SET = {"v2Pro", "v2ProPlus"}
 
 # PyTorch 2.6+ defaults to dynamo/torch.export ONNX; GPT-SoVITS needs legacy export.
 _LEGACY_ONNX_KWARGS = {"dynamo": False}
+
+
+def export_vits_graph(model, inputs, path):
+    import onnx
+
+    names = ["text_seq", "pred_semantic", "ref_audio"]
+    if len(inputs) == 4:
+        names.append("sv_emb")
+    torch.onnx.export(
+        model, inputs, path, input_names=names, output_names=["audio"],
+        dynamic_axes={
+            "text_seq": {1: "text_length"},
+            "pred_semantic": {2: "pred_length"},
+            "ref_audio": {1: "audio_length"},
+        },
+        opset_version=20, verbose=False, **_LEGACY_ONNX_KWARGS,
+    )
+    graph = onnx.load(path)
+    graph.metadata_props.add(key="vits.unpadded", value="1")
+    onnx.save(graph, path)
 
 
 def is_v2pro(version: str) -> bool:
@@ -155,7 +176,28 @@ class T2SModel(nn.Module):
         y[0, -1] = 0
         return y[:, prefix_len:].unsqueeze(0)
 
-    def export(self, ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name):
+    def export_shared_step(self, path):
+        from AR.models.t2s_model_onnx import T2SSharedCacheDecoder
+
+        layers = self.t2s_model.num_layers
+        attention = self.t2s_model.h.layers[0].self_attn
+        shape = (1, attention.num_heads, 8, attention.head_dim)
+        keys = [torch.zeros(shape) for _ in range(layers)]
+        values = [torch.zeros(shape) for _ in range(layers)]
+        inputs = [f"{kind}_cache_{i}" for kind in ("ik", "iv") for i in range(layers)]
+        outputs = [f"{kind}_cache_{i}" for kind in ("k", "v") for i in range(layers)]
+        torch.onnx.export(
+            T2SSharedCacheDecoder(self.stage_decoder).eval(),
+            (torch.zeros((1, 1), dtype=torch.long), keys, values,
+             torch.tensor([3]), torch.tensor([5], dtype=torch.int32)),
+            path,
+            input_names=["iy", *inputs, "position", "past_length"],
+            output_names=["logits", *outputs],
+            dynamic_axes={name: {2: "cache_capacity"} for name in (*inputs, *outputs)},
+            opset_version=20, custom_opsets={"com.microsoft": 1}, **_LEGACY_ONNX_KWARGS,
+        )
+
+    def export(self, ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name, shared_kv=False):
         torch.onnx.export(
             self.onnx_encoder,
             (ssl_content),
@@ -175,11 +217,7 @@ class T2SModel(nn.Module):
         bert = bert.unsqueeze(0)
         x = torch.cat([ref_seq, text_seq], 1)
         y_len = prompts.shape[1]
-
-
         num_layers = self.t2s_model.num_layers
-        k_cache = [torch.zeros((1, 0, 1, 512), dtype=x.dtype, device=x.device) for _ in range(num_layers)]
-        v_cache = [torch.zeros((1, 0, 1, 512), dtype=x.dtype, device=x.device) for _ in range(num_layers)]
 
         # Export first stage decoder
         torch.onnx.export(
@@ -198,9 +236,14 @@ class T2SModel(nn.Module):
             opset_version=20,
             **_LEGACY_ONNX_KWARGS,
         )
-        logits, k_cache, v_cache  = self.first_stage_decoder(x, prompts, bert)
-        samples = sample(logits, prompts,top_k=15, top_p = 1.0, temperature=1.0)[0].unsqueeze(0)
-        y = torch.concat([prompts, samples], dim=1)
+        if shared_kv:
+            self.export_shared_step(f"onnx/{project_name}/t2s_s_decoder.onnx")
+            return
+        # The step tracer only needs the cache layout and one valid token.
+        cache_shape = (x.shape[0], x.shape[1] + y_len, self.t2s_model.model_dim)
+        k_cache = [bert.new_zeros(cache_shape) for _ in range(num_layers)]
+        v_cache = [bert.new_zeros(cache_shape) for _ in range(num_layers)]
+        y = torch.cat([prompts, prompts.new_zeros((prompts.shape[0], 1))], dim=1)
         idx = 0
         # Export stage decoder
         torch.onnx.export(
@@ -243,6 +286,10 @@ class VitsModel(nn.Module):
         self.vq_model.eval()
         self.vq_model.load_state_dict(dict_s2["weight"], strict=False)
         self.vq_model.dec.remove_weight_norm()
+        self.vq_model.dec.pack_upsamples_for_export()
+        for layer in self.vq_model.enc_p.modules():
+            if isinstance(layer, MultiHeadAttention):
+                layer.pack_projections_for_export()
         
     def forward(self, text_seq, pred_semantic, ref_audio, sv_emb=None):
         refer = spectrogram_torch(
@@ -272,15 +319,16 @@ class GptSoVits(nn.Module):
         else:
             return self.vits(text_seq, pred_semantic, ref_audio)
 
-    def export(self, ref_seq, text_seq, ref_bert, text_bert, ref_audio, ssl_content, project_name):
-        self.t2s.export(ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name)
-        pred_semantic = self.t2s(ref_seq, text_seq, ref_bert, text_bert, ssl_content)
+    def export(self, ref_seq, text_seq, ref_bert, text_bert, ref_audio, ssl_content, project_name, shared_kv=False):
+        self.t2s.export(ref_seq, text_seq, ref_bert, text_bert, ssl_content, project_name, shared_kv)
+        # Use the same representative semantic length as the VITS-only exporter.
+        pred_semantic = text_seq.new_zeros((1, 1, 160))
         if is_v2pro(self.version):
             dummy_audio_16k = torchaudio.functional.resample(ref_audio, self.vits.hps.data.sampling_rate, 16000).float()
             audio_feature = Kaldi.fbank(dummy_audio_16k, num_mel_bins=80, sample_frequency=16000, dither=0)
             print("Exporting SV model...")
             print(audio_feature.shape)
-            sv_emb = self.sv_model(audio_feature)
+            sv_emb = ref_audio.new_zeros((1, self.vits.vq_model.sv_emb.in_features))
             torch.onnx.export(
                 self.sv_model,
                 audio_feature,
@@ -294,37 +342,10 @@ class GptSoVits(nn.Module):
                 verbose=False,
                 **_LEGACY_ONNX_KWARGS,
             )
-            torch.onnx.export(
-                self.vits,
-                (text_seq, pred_semantic, ref_audio, sv_emb),
-                f"onnx/{project_name}/vits.onnx",
-                input_names=["text_seq", "pred_semantic", "ref_audio", "sv_emb"],
-                output_names=["audio"],
-                dynamic_axes={
-                    "text_seq": {1: "text_length"},
-                    "pred_semantic": {2: "pred_length"},
-                    "ref_audio": {1: "audio_length"},
-                },
-                opset_version=20,
-                verbose=False,
-                **_LEGACY_ONNX_KWARGS,
-            )
+            inputs = (text_seq, pred_semantic, ref_audio, sv_emb)
         else:
-            torch.onnx.export(
-                self.vits,
-                (text_seq, pred_semantic, ref_audio),
-                f"onnx/{project_name}/vits.onnx",
-                input_names=["text_seq", "pred_semantic", "ref_audio"],
-                output_names=["audio"],
-                dynamic_axes={
-                    "text_seq": {1: "text_length"},
-                    "pred_semantic": {2: "pred_length"},
-                    "ref_audio": {1: "audio_length"},
-                },
-                opset_version=20,
-                verbose=False,
-                **_LEGACY_ONNX_KWARGS,
-            )
+            inputs = (text_seq, pred_semantic, ref_audio)
+        export_vits_graph(self.vits, inputs, f"onnx/{project_name}/vits.onnx")
 
 class SSLModel(nn.Module):
     def __init__(self):
@@ -371,56 +392,38 @@ class ExportERes2NetV2(nn.Module): # SV model
 
 
 
-class MyBertModel(torch.nn.Module):
+class MyBertModel(nn.Module):
     def __init__(self, bert_model):
-        super(MyBertModel, self).__init__()
+        super().__init__()
         self.bert = bert_model
+        # The voice checkpoint consumes the state two layers before the end.
+        self.bert.encoder.layer = self.bert.encoder.layer[:-2]
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        token_type_ids: torch.Tensor,
-    ):
-        outputs = self.bert(
+    def forward(self, input_ids, attention_mask, token_type_ids):
+        output = self.bert(
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
         )
-        res = torch.cat(outputs["hidden_states"][-3:-2], -1)[0][1:-1]
-        # res = torch.cat(outputs[1][-3:-2], -1)[0][1:-1]
-        # return build_phone_level_feature(res, word2ph) #directly using this may cause bug and add a subgraph, use rust code
-        return res
+        return output.last_hidden_state[0, 1:-1]
 
 
 def export_bert(project_name):
-    from transformers import AutoModelForMaskedLM, AutoTokenizer
+    from transformers import AutoModel, AutoTokenizer
     bert_path = os.environ.get(
         "bert_path", "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
     )
     tokenizer = AutoTokenizer.from_pretrained(bert_path)
-
-    text = "叹息声一声接着一声传出,木兰对着房门织布.听不见织布机织布的声音,只听见木兰在叹息.问木兰在想什么?问木兰在惦记什么?木兰答道,我也没有在想什么,也没有在惦记什么."
-    ref_bert_inputs = tokenizer(text, return_tensors="pt")
-    word2ph = []
-    for c in text:
-        if c in ["，", "。", "：", "？", ",", ".", "?"]:
-            word2ph.append(1)
-        else:
-            word2ph.append(2)
-    ref_bert_inputs["word2ph"] = torch.Tensor(word2ph).int()
-
-    bert_model = AutoModelForMaskedLM.from_pretrained(
-        bert_path, output_hidden_states=True,
-    )
-    my_bert_model = MyBertModel(bert_model)
+    inputs = tokenizer("问木兰在想什么，问木兰在惦记什么。", return_tensors="pt")
+    bert_model = AutoModel.from_pretrained(bert_path, add_pooling_layer=False)
+    my_bert_model = MyBertModel(bert_model).eval()
 
     torch.onnx.export(
         my_bert_model,
         (
-            ref_bert_inputs["input_ids"],
-            ref_bert_inputs["attention_mask"],
-            ref_bert_inputs["token_type_ids"],
+            inputs["input_ids"],
+            inputs["attention_mask"],
+            inputs["token_type_ids"],
         ),
         f"onnx/{project_name}/bert.onnx",
         input_names=["input_ids", "attention_mask", "token_type_ids"],
@@ -437,7 +440,7 @@ def export_bert(project_name):
     print("#### exported bert ####")
 
 
-def export(vits_path, gpt_path, project_name, vits_model="v2"):
+def export(vits_path, gpt_path, project_name, vits_model="v2", shared_kv=False):
     vits = VitsModel(vits_path, version=vits_model)
     gpt = T2SModel(gpt_path, vits)
     sv_model = None
@@ -475,7 +478,7 @@ def export(vits_path, gpt_path, project_name, vits_model="v2"):
         **_LEGACY_ONNX_KWARGS,
     )
     export_bert(project_name)
-    gpt_sovits.export(ref_seq, text_seq, ref_bert, text_bert, ref_audio_sr, ssl_content, project_name)
+    gpt_sovits.export(ref_seq, text_seq, ref_bert, text_bert, ref_audio_sr, ssl_content, project_name, shared_kv)
 
     a = gpt_sovits(ref_seq, text_seq, ref_bert, text_bert, ref_audio_sr, ssl_content).detach().cpu().numpy()
     soundfile.write("out.wav", a, vits.hps.data.sampling_rate)
@@ -512,16 +515,10 @@ def export_vits_only(vits_path, project_name, version):
     semantic = torch.zeros((1, 1, 160), dtype=torch.long)
     reference = torch.zeros((1, model.hps.data.sampling_rate * 5))
     inputs = (text, semantic, reference)
-    names = ["text_seq", "pred_semantic", "ref_audio"]
     if is_v2pro(version):
-        inputs += (torch.zeros((1, 20480)),)
-        names.append("sv_emb")
+        inputs += (torch.zeros((1, model.vq_model.sv_emb.in_features)),)
     os.makedirs(f"onnx/{project_name}", exist_ok=True)
-    torch.onnx.export(model, inputs, f"onnx/{project_name}/vits.onnx",
-        input_names=names, output_names=["audio"],
-        dynamic_axes={"text_seq": {1: "text_length"}, "pred_semantic": {2: "pred_length"},
-                      "ref_audio": {1: "audio_length"}},
-        opset_version=20, verbose=False, **_LEGACY_ONNX_KWARGS)
+    export_vits_graph(model, inputs, f"onnx/{project_name}/vits.onnx")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export model to ONNX")
@@ -541,7 +538,10 @@ if __name__ == "__main__":
     parser.add_argument("--gpt-checkpoint", help="Override model_path/gpt.ckpt")
     parser.add_argument("--sovits-checkpoint", help="Override model_path/sovits.pth")
     parser.add_argument("--vits-only", action="store_true", help="Refresh only VITS from checkpoint")
+    parser.add_argument("--shared-kv", action="store_true", help="Export the T2S step decoder with reusable CPU KV buffers")
     args = parser.parse_args()
+    if args.vits_only and args.shared_kv:
+        parser.error("--shared-kv requires a full export")
 
     try:
         os.mkdir("onnx")
@@ -554,6 +554,6 @@ if __name__ == "__main__":
         if args.vits_only:
             export_vits_only(vits_path, args.export_name, version)
         else:
-            export(vits_path, gpt_path, args.export_name, version)
+            export(vits_path, gpt_path, args.export_name, version, args.shared_kv)
 
     # soundfile.write("out.wav", a, vits.hps.data.sampling_rate)

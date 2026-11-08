@@ -29,7 +29,8 @@ def _masks(model):
 
     masks = []
     for node in model.graph.node:
-        if node.op_type != "Less" or not ("/enc_p/" in node.name or node.name in ("/vq_model/Less", "/Less")):
+        scope = node.name.rpartition("/")[0]
+        if node.op_type != "Less" or not (scope.endswith("/enc_p") or node.name in ("/vq_model/Less", "/Less")):
             continue
         unsqueeze = producers.get(node.input[0])
         sequence = producers.get(unsqueeze.input[0]) if unsqueeze is not None and unsqueeze.op_type == "Unsqueeze" else None
@@ -40,6 +41,10 @@ def _masks(model):
             raise ValueError(f"VITS mask range is not dynamic: {node.name}")
         masks.append((node, limit, constants.get(node.input[1])))
     inputs = {x.name for x in model.graph.input}
+    if any(prop.key == "vits.unpadded" and prop.value == "1" for prop in model.metadata_props):
+        if masks or not {"pred_semantic", "text_seq", "ref_audio"} <= inputs:
+            raise ValueError("unexpected masks or inputs in an unpadded VITS export")
+        return masks
     expected = (2 if "pred_semantic" in inputs else 0) + (1 if "ref_audio" in inputs else 0)
     if not expected or len(masks) != expected:
         raise ValueError(f"expected {expected} dynamic VITS masks, found {len(masks)}")

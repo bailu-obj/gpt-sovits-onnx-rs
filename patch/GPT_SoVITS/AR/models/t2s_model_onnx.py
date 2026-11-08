@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchmetrics.classification import MulticlassAccuracy
 from AR.modules.embedding_onnx import SinePositionalEmbedding, TokenEmbedding
 from AR.modules.transformer_onnx import LayerNorm, TransformerEncoder, TransformerEncoderLayer
@@ -101,7 +100,6 @@ class T2SFirstStageDecoder(nn.Module):
         h,
         ar_predict_layer,
         num_layers,
-        num_head,
     ):
         super().__init__()
         self.ar_text_embedding = ar_text_embedding
@@ -112,7 +110,6 @@ class T2SFirstStageDecoder(nn.Module):
         self.h = h
         self.ar_predict_layer = ar_predict_layer
         self.num_layers = num_layers
-        self.num_head = num_head
 
     def forward(self, x, prompt, bert_feature):
         x = self.ar_text_embedding(x)
@@ -126,18 +123,13 @@ class T2SFirstStageDecoder(nn.Module):
         xy_pos = torch.concat([x, y_pos], dim=1)
         y_len = y_emb.shape[1]
 
-        x_attn_mask_pad = F.pad(
-                torch.zeros((x_len, x_len), dtype=torch.bool),
-                (0, y_len),
-                value=True,
-            )
-        y_attn_mask = F.pad(
-                torch.triu(torch.ones(y_len, y_len, dtype=torch.bool), diagonal=1),
-                (x_len, 0),
-                value=False,
-            )
-        src_len = x_len + y_len
-        xy_attn_mask = torch.concat([x_attn_mask_pad, y_attn_mask], dim=0).unsqueeze(0).expand(self.num_head, -1, -1).view(1, self.num_head, src_len, src_len)
+        positions = torch.arange(x_len + y_len, device=x.device)
+        query_positions = positions[:, None]
+        key_positions = positions[None, :]
+        # Every query sees all text keys. Prompt queries see their causal prefix.
+        xy_attn_mask = (key_positions >= x_len) & (
+            (query_positions < x_len) | (key_positions > query_positions)
+        )
         xy_dec, k_cache, v_cache = self.h(xy_pos, mask=xy_attn_mask, k_cache=None, v_cache=None, first_infer=True)
         logits = self.ar_predict_layer(xy_dec[:, -1])
         # samples = sample(logits[0], y,top_k=self.top_k, top_p = 1.0, temperature=1.0)[0].unsqueeze(0) # 避免句首不稳定
@@ -170,6 +162,26 @@ class T2SStageDecoder(nn.Module):
         logits = self.ar_predict_layer(xy_dec[:, -1])
 
         return logits[0], k_cache, v_cache
+
+
+class T2SSharedCacheDecoder(nn.Module):
+    def __init__(self, decoder):
+        super().__init__()
+        self.decoder = decoder
+
+    def forward(self, token, k_cache, v_cache, position, past_length):
+        decoder = self.decoder
+        embedding = decoder.ar_audio_embedding(token).squeeze(1)
+        pos = decoder.ar_audio_position
+        x = embedding * pos.x_scale + pos.alpha * pos.pe[0, position]
+        # ORT expects the current token index as [batch] and the total as a scalar.
+        lengths = (past_length, past_length[0] + 1)
+        x, k_cache, v_cache = decoder.h(
+            x, mask=None, k_cache=k_cache, v_cache=v_cache,
+            first_infer=False, cache_lengths=lengths,
+        )
+        return decoder.ar_predict_layer(x)[0], k_cache, v_cache
+
 
 class Text2SemanticDecoder(nn.Module):
     def __init__(self, config, norm_first=False):
@@ -211,7 +223,6 @@ class Text2SemanticDecoder(nn.Module):
             self.h,
             self.ar_predict_layer,
             self.num_layers,
-            self.num_head,
         )
         self.stage_decoder = T2SStageDecoder(
             self.ar_audio_embedding,

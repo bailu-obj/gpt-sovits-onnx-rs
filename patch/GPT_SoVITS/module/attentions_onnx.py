@@ -48,15 +48,17 @@ class Encoder(nn.Module):
         ])
         self.norm_layers_2 = nn.ModuleList([LayerNorm(hidden_channels) for _ in range(n_layers)])
 
-    def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
-        attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
-        x = x * x_mask
+    def forward(self, x: torch.Tensor, x_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        attn_mask = None
+        if x_mask is not None:
+            attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
+            x = x * x_mask
         for attn, norm1, ffn, norm2 in zip(self.attn_layers, self.norm_layers_1, self.ffn_layers, self.norm_layers_2):
             residual = x
             x = norm1(residual + attn(x, x, attn_mask))
             residual = x
             x = norm2(residual + ffn(x, x_mask))
-        return x * x_mask
+        return x if x_mask is None else x * x_mask
 
 class MultiHeadAttention(nn.Module):
     """Multi-head attention with optional relative positional embeddings."""
@@ -83,6 +85,8 @@ class MultiHeadAttention(nn.Module):
         self.conv_v = nn.Conv1d(channels, channels, 1)
         self.conv_o = nn.Conv1d(channels, out_channels, 1)
         self.drop = nn.Dropout(p_dropout)
+        self.register_buffer("packed_weight", None)
+        self.register_buffer("packed_bias", None)
 
         if window_size is not None:
             rel_stddev = self.k_channels ** -0.5
@@ -97,10 +101,22 @@ class MultiHeadAttention(nn.Module):
                 self.conv_k.weight.copy_(self.conv_q.weight)
                 self.conv_k.bias.copy_(self.conv_q.bias)
 
+    def pack_projections_for_export(self):
+        # Relative attention is self-attention in these encoders. MRTE shares only K/V.
+        layers = (self.conv_k, self.conv_v)
+        if self.window_size is not None:
+            layers = (self.conv_q, *layers)
+        self.packed_weight = torch.cat([layer.weight.detach() for layer in layers], dim=0)
+        self.packed_bias = torch.cat([layer.bias.detach() for layer in layers], dim=0)
+
     def forward(self, x: torch.Tensor, c: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        q = self.conv_q(x)
-        k = self.conv_k(c)
-        v = self.conv_v(c)
+        if self.packed_weight is None:
+            q, k, v = self.conv_q(x), self.conv_k(c), self.conv_v(c)
+        elif self.window_size is not None:
+            q, k, v = F.conv1d(x, self.packed_weight, self.packed_bias).split(self.channels, dim=1)
+        else:
+            q = self.conv_q(x)
+            k, v = F.conv1d(c, self.packed_weight, self.packed_bias).split(self.channels, dim=1)
         x, _ = self.attention(q, k, v, attn_mask)
         return self.conv_o(x)
 
@@ -111,12 +127,18 @@ class MultiHeadAttention(nn.Module):
         key = key.view(b, self.n_heads, self.k_channels, -1).transpose(2, 3)
         value = value.view(b, self.n_heads, self.k_channels, -1).transpose(2, 3)
 
-        scores = torch.matmul(query * (self.k_channels ** -0.5), key.transpose(-2, -1))
+        query = query * (self.k_channels ** -0.5)
+        scores = torch.matmul(query, key.transpose(-2, -1))
 
         if self.window_size is not None:
-            key_relative_embeddings = self._get_relative_embeddings(self.emb_rel_k, t_s)
-            rel_logits = torch.matmul(query * (self.k_channels ** -0.5), key_relative_embeddings.unsqueeze(0).transpose(-2, -1))
-            scores = scores + self._relative_position_to_absolute_position(rel_logits)
+            positions = torch.arange(t_s, device=query.device)
+            offsets = torch.arange(-self.window_size, self.window_size + 1, device=query.device)
+            neighbors = positions[:, None] + offsets
+            valid = (neighbors >= 0) & (neighbors < t_s)
+            neighbors = neighbors.clamp(0, t_s - 1).expand(b, self.n_heads, -1, -1)
+            # Each relative embedding contributes only inside its fixed window.
+            relative_logits = query @ self.emb_rel_k.unsqueeze(0).transpose(-2, -1)
+            scores = scores.scatter_add(-1, neighbors, relative_logits.masked_fill(~valid, 0))
 
         if mask is not None:
             scores.masked_fill_(mask == 0, -1e4)  # In-place operation
@@ -126,38 +148,11 @@ class MultiHeadAttention(nn.Module):
         output = torch.matmul(p_attn, value)
 
         if self.window_size is not None:
-            relative_weights = self._absolute_position_to_relative_position(p_attn)
-            value_relative_embeddings = self._get_relative_embeddings(self.emb_rel_v, t_s)
-            output.add_(torch.matmul(relative_weights, value_relative_embeddings.unsqueeze(0)))
+            relative_weights = p_attn.gather(-1, neighbors).masked_fill(~valid, 0)
+            output = output + relative_weights @ self.emb_rel_v.unsqueeze(0)
 
         output = output.transpose(2, 3).contiguous().view(b, d, -1)
         return output, p_attn
-
-    def _get_relative_embeddings(self, relative_embeddings: torch.Tensor, length: int) -> torch.Tensor:
-        max_rel_pos = 2 * self.window_size + 1
-        pad_length = max(length - (self.window_size + 1), 0)
-        slice_start = max((self.window_size + 1) - length, 0)
-        slice_end = slice_start + 2 * length - 1
-
-        if pad_length > 0:
-            padded = F.pad(relative_embeddings, (0, 0, pad_length, pad_length))
-        else:
-            padded = relative_embeddings
-        return padded[:, slice_start:slice_end]
-
-    def _relative_position_to_absolute_position(self, x):
-        batch, heads, length, _ = x.size()
-        x = F.pad(x, (0, 1))
-        x_flat = x.view(batch, heads, -1)
-        x_flat = F.pad(x_flat, (0, length - 1))
-        return x_flat.view(batch, heads, length + 1, -1)[:, :, :length, length - 1:]
-
-    def _absolute_position_to_relative_position(self, x: torch.Tensor) -> torch.Tensor:
-        batch, heads, length, _ = x.size()
-        x = F.pad(x, (0, length - 1))
-        x_flat = x.view(batch, heads, -1)
-        x_flat = F.pad(x_flat, (length, 0))
-        return x_flat.view(batch, heads, length, -1)[:, :, :, 1:]
 
 class FFN(nn.Module):
     """Feed-forward network with convolutional layers."""
@@ -183,13 +178,14 @@ class FFN(nn.Module):
         self.conv_2 = nn.Conv1d(filter_channels, out_channels, kernel_size, padding=self._get_padding())
         self.drop = nn.Dropout(p_dropout)
 
-    def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
-        x = x * x_mask
+    def forward(self, x: torch.Tensor, x_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if x_mask is not None:
+            x = x * x_mask
         x = self.conv_1(x)
         x = F.gelu(x) if self.activation == "gelu" else torch.relu(x)
         x = self.drop(x)
         x = self.conv_2(x)
-        return x * x_mask
+        return x if x_mask is None else x * x_mask
 
     def _get_padding(self) -> int:
         if self.kernel_size == 1:
@@ -209,7 +205,11 @@ class MRTE(nn.Module):
         self.text_pre = nn.Conv1d(content_enc_channels, hidden_size, 1)
         self.c_post = nn.Conv1d(hidden_size, out_channels, 1)
 
-    def forward(self, ssl_enc: torch.Tensor, ssl_mask: torch.Tensor, text: torch.Tensor, text_mask: torch.Tensor, ge: torch.Tensor) -> torch.Tensor:
+    def forward(self, ssl_enc: torch.Tensor, ssl_mask: Optional[torch.Tensor], text: torch.Tensor, text_mask: Optional[torch.Tensor], ge: torch.Tensor) -> torch.Tensor:
+        if ssl_mask is None and text_mask is None:
+            ssl_enc = self.c_pre(ssl_enc)
+            text_enc = self.text_pre(text)
+            return self.c_post(self.cross_attention(ssl_enc, text_enc) + ssl_enc + ge)
         attn_mask = text_mask.unsqueeze(2) * ssl_mask.unsqueeze(-1)
         ssl_enc = self.c_pre(ssl_enc * ssl_mask)
         text_enc = self.text_pre(text * text_mask)

@@ -4,10 +4,11 @@
 
 ## 推荐部署
 
-macOS / Android 推荐官方 **v2Pro + quality**。使用 `s1v3.ckpt` 和
-`v2Pro/s2Gv2Pro.pth`；BERT/G2PW 仅 MatMul 权重 INT8，T2S、VITS、SSL、SV
-及激活保持 FP32。模型约 2.12 GiB，必须部署 `sv.onnx`。
-参考文字必须与实际 WAV 匹配，不能沿用其他音频的默认转录。
+macOS 和 Android 默认推荐官方 **v2Pro + quality**。使用 `s1v3.ckpt` 和
+`v2Pro/s2Gv2Pro.pth`。启用 `05_export.sh --quant` 时默认使用 `quality`，
+仅将 BERT/G2PW 的 MatMul 权重转为 INT8。T2S、VITS、SSL、SV 及激活保持 FP32。
+完整模型包包含 `sv.onnx`，约 2.12 GiB。参考文字使用对应 WAV 的准确转录。
+Android 也可单独导出 [低延迟配置](#android-低延迟导出)。
 
 ## 目录结构
 
@@ -112,19 +113,55 @@ V2Pro 还需 SV 权重：`GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w
 python scripts/optimize_aio.py --input-dir onnx/v2pro --output-dir onnx-patched/v2pro --no-quant
 ```
 
-量化提供两个配置：默认 `--profile compact` 沿用 BERT/G2PW INT4、语义
-decoder 动态 INT8（缩减范围）。`--profile quality` 将两个语义 decoder、
-VITS、SSL、T2S encoder 保留 FP32，只对 BERT/G2PW 的常量 MatMul 权重做
-INT8，块大小 32，`accuracy_level=1` 保留 FP32 激活；词嵌入、Attention、
-发音分类层不量化。`--no-quant` 对两种配置都生效。
+PyTorch 导出使用固定宽度的 Q/K/V 分割、广播的首步注意力掩码、窗口化的
+VITS 相对注意力和低采样率打包上采样卷积。VITS 的注意力投影在导出前合并，
+BERT 只执行音色模型使用的前 22 层。这些改动也用于 `--no-quant`。
+
+`--profile compact` 使用 BERT/G2PW INT4 和语义 decoder 动态 INT8。
+`--profile quality` 仅将 BERT/G2PW 的常量 MatMul 权重转为 INT8，
+块大小为 32，`accuracy_level=1` 保留 FP32 激活。
+
+`--profile rtf` 在 quality 基础上将逐 token 语义 decoder 的大型投影转为 INT4。
 
 ```bash
 python scripts/optimize_aio.py --input-dir onnx/v2 \
   --output-dir onnx-patched/v2-quality --profile quality
 ```
 
-quality 的目标是减少文本特征和自回归语义生成的量化损失；模型包与常驻
-内存增加，具体音质和速度须用相同参考音频、文本、采样参数在目标设备比较。
+## Android 低延迟导出
+
+完成上面的 macOS 准备步骤后，用单独的导出名称生成 Android 模型包：
+
+```bash
+VITS_CALIBRATION_DIR=/path/to/vits-calibration
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro-mobile \
+  --quant --profile mobile --shared-kv --vits-calibration-dir "${VITS_CALIBRATION_DIR}"
+./scripts/export/validate_bundle.sh \
+  --bundle-dir gpt-sovits-upstream/onnx-patched/v2pro-mobile --expect-v2pro
+```
+
+| 模型 | `quality` | Android `mobile` |
+|------|-------------|--------------------|
+| BERT、G2PW | 分块 INT8 权重，FP32 激活 | 动态 INT8 投影 |
+| T2S 首步 | FP32 | 动态 INT8 投影 |
+| T2S 逐 token | FP32 | 分块 INT4 投影，FP32 词表输出层 |
+| SoVITS 声码器 | FP32 | 前九个残差块的卷积经校准后使用逐通道 INT8，其余保持 FP32 |
+| SSL、SV、T2S encoder、英语 G2P | FP32 | FP32 |
+
+`--vits-calibration-dir` 中的每个 `.npz` 对应一组代表性输入，包含
+`text_seq`、`pred_semantic`、`ref_audio` 和 Pro 系列的 `sv_emb`，
+数组形状和类型与 ONNX 输入一致。省略校准目录时，`mobile` 声码器保持 FP32。
+带 `g2pw.shared_context=1` 的 G2PW 图对同一段文字编码一次，再给多个多音字位置评分。
+
+`--shared-kv` 独立于量化配置，也可用于 `quality`。它为 T2S 逐 token
+解码导出融合 CPU attention。支持该布局的 Rust 运行时把首步缓存转为
+`[1, heads, capacity, head_dim]`，再将 past 和 present 绑定到同一缓冲区，
+并按长句需要扩容。运行时根据 `past_length` 输入识别该图，也支持原有的逐步增长缓存图。
+
+在 Galaxy S25 Ultra 上，含校准 VITS 的 `mobile` 模型试听中位 RTF 约为
+0.36，启用共享 KV 后约为 0.27。在 M4 Pro 的 `quality` 对比中，同一组
+12 条文本以两个采样种子合成，共享 KV 前后的 24 对 PCM 一致。
+在目标设备上比较时使用相同文本、参考音频和采样参数，RTF 为合成耗时除以音频时长。
 
 ## 导出产物
 
@@ -132,9 +169,9 @@ quality 的目标是减少文本特征和自回归语义生成的量化损失；
 |------|----|-------------------|
 | `ssl.onnx` | ✓ | ✓ |
 | `bert.onnx` | ✓ | ✓ |
-| `{name}_t2s_encoder.onnx` | ✓ | ✓ |
-| `{name}_t2s_fs_decoder.onnx` | ✓ | ✓ |
-| `{name}_t2s_s_decoder.onnx` | ✓ | ✓ |
+| `t2s_encoder.onnx` | ✓ | ✓ |
+| `t2s_fs_decoder.onnx` | ✓ | ✓ |
+| `t2s_s_decoder.onnx` | ✓ | ✓ |
 | `{name}_vits.onnx` | 3 输入 | 4 输入（+ `sv_emb`） |
 | `sv.onnx` | — | ✓ |
 | `{name}.json` | 元数据（含 `NumLayers`、`IsV2Pro`） | 同上 |
@@ -234,13 +271,13 @@ PYTHON_PREPROCESS_JSON=/tmp/python_preprocess.json cargo test preprocess_parity_
 
 ### Dynamic VITS lengths
 
-VITS semantic, text and reference masks must use runtime shape lengths. Legacy
-`torch.LongTensor([tensor.size(axis)])` exports freeze those values and cause
-periodic noise once the utterance exceeds the traced length. The patch uses
-`torch._shape_as_tensor`; `optimize_aio.py` repairs old full-length masks before
-optimization and verifies them afterward. `vits_dynamic.py INPUT --output OUTPUT`
-repairs an old FP32 export without quantizing its weights; omitting `--output`
-validates only. Repairing masks does not require changing ORT.
+Current VITS exports take an unpadded utterance and reference and mark the graph
+with `vits.unpadded=1`. Runtime shapes still determine the semantic, phone, and
+reference lengths. Older exports use full-length masks, which can freeze at the
+trace length and introduce periodic noise. `optimize_aio.py` verifies current
+graphs and repairs frozen masks on legacy graphs. `vits_dynamic.py INPUT --output
+OUTPUT` performs the legacy repair separately. With just `INPUT` it validates
+either export format.
 
 For custom v2 checkpoints, `05_export.sh --version v2 --export-name v2
 --model-path "$HOME/models/gpt-sovits-simple/kaoyu_v2"` accepts
@@ -255,7 +292,7 @@ and `cargo test --release --lib`. Test audio longer than the original trace and
 verify every mask includes its entire runtime sequence; finite/nonzero PCM alone
 cannot detect periodic tail noise.
 
-`--vits-only` refreshes only the FP32 vocoder from the selected checkpoint, keeping
+`--vits-only` refreshes the vocoder from the selected checkpoint, keeping
 existing T2S/text/speaker exports. Use it only when those exports already match
 the same checkpoint family. It avoids loading HuBERT, BERT and training metrics;
 full exports still load those dependencies normally. The VITS-only path has been

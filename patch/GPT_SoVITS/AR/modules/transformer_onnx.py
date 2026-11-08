@@ -107,6 +107,7 @@ class TransformerEncoder(nn.Module):
         k_cache: Optional[List[Tensor]] = None,
         v_cache: Optional[List[Tensor]] = None,
         first_infer: bool = True,
+        cache_lengths: Optional[Tuple[Tensor, Tensor]] = None,
     ) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
         output = src
         new_k_cache = []
@@ -119,6 +120,7 @@ class TransformerEncoder(nn.Module):
                 k_cache=k_cache[i] if k_cache is not None else None,
                 v_cache=v_cache[i] if v_cache is not None else None,
                 first_infer=first_infer,
+                cache_lengths=cache_lengths,
             )
             new_k_cache.append(k)
             new_v_cache.append(v)
@@ -203,6 +205,7 @@ class TransformerEncoderLayer(nn.Module):
         k_cache: Optional[Tensor] = None,
         v_cache: Optional[Tensor] = None,
         first_infer: bool = True,
+        cache_lengths: Optional[Tuple[Tensor, Tensor]] = None,
     ) -> Tuple[Tensor, Tensor, Tensor]:
         attn, k, v = self.self_attn(
             x,
@@ -212,6 +215,7 @@ class TransformerEncoderLayer(nn.Module):
             k_cache=k_cache,
             v_cache=v_cache,
             first_infer=first_infer,
+            cache_lengths=cache_lengths,
         )
 
         x = x + attn

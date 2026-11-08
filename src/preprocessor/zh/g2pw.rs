@@ -1,6 +1,6 @@
-use ndarray::Array;
+use ndarray::{Array, Axis, Ix2};
 use ort::value::Tensor;
-use std::{fmt::Debug, path::Path, str::FromStr, sync::Arc};
+use std::{fmt::Debug, path::Path, str::FromStr, sync::Arc, time::Instant};
 use tokenizers::Tokenizer;
 
 use crate::{onnx_builder::create_onnx_cpu_session, preprocessor::utils::*};
@@ -31,19 +31,25 @@ impl Debug for G2PWOut {
 pub struct G2PW {
     model: Option<ort::session::Session>,
     tokenizers: Option<Arc<tokenizers::Tokenizer>>,
+    shared_context: bool,
 }
 
 impl G2PW {
     pub fn new<P: AsRef<Path>>(g2pw_path: Option<P>) -> anyhow::Result<Self> {
         if let Some(g2pw_path) = g2pw_path {
+            let model = create_onnx_cpu_session(g2pw_path)?;
+            let shared_context =
+                model.metadata()?.custom("g2pw.shared_context").as_deref() == Some("1");
             Ok(Self {
-                model: Some(create_onnx_cpu_session(g2pw_path)?),
+                model: Some(model),
                 tokenizers: Some(Arc::new(Tokenizer::from_str(BERT_TOKENIZER).unwrap())),
+                shared_context,
             })
         } else {
             Ok(Self {
                 model: None,
                 tokenizers: None,
+                shared_context: false,
             })
         }
     }
@@ -110,16 +116,19 @@ impl G2PW {
             } else if let Some(poly) = DICT_POLY_CHARS.get(&c) {
                 pre_data.push(G2PWOut::Pinyin("".to_owned()));
                 // 这个位置是 tokens 的位置，它的前后添加了 '[CLS]' 和 '[SEP]' 两个特殊字符
-                query_id.push(i + 1);
-                chars_id.push(poly.index);
+                query_id.push((i + 1) as i64);
+                chars_id.push(poly.index as i64);
                 let mut phoneme_mask = vec![0f32; POLY_LABLES.len()];
                 for (_, i) in &poly.phones {
                     phoneme_mask[*i] = 1.0;
                 }
-                phoneme_masks.push(phoneme_mask);
+                phoneme_masks.extend(phoneme_mask);
             } else {
                 pre_data.push(G2PWOut::RawChar(c));
             }
+        }
+        if query_id.is_empty() {
+            return Ok(pre_data);
         }
         let input_ids =
             Tensor::from_array(Array::from_shape_vec((1, input_ids.len()), input_ids).unwrap())
@@ -133,38 +142,41 @@ impl G2PW {
         )
         .unwrap();
 
-        for ((position_id, phoneme_mask), char_id) in query_id
-            .iter()
-            .zip(phoneme_masks.iter())
-            .zip(chars_id.iter())
-        {
-            let phoneme_mask = Tensor::from_array(
-                Array::from_shape_vec((1, phoneme_mask.len()), phoneme_mask.to_vec()).unwrap(),
-            )
-            .unwrap();
-            let position_id_t =
-                Tensor::from_array(Array::from_vec([*position_id as i64].to_vec())).unwrap();
-            let char_id = Tensor::from_array(Array::from_vec([*char_id as i64].to_vec())).unwrap();
+        let query_count = query_id.len();
+        let chunk_size = if self.shared_context { query_count } else { 1 };
+        let label_count = POLY_LABLES.len();
+        for start in (0..query_count).step_by(chunk_size) {
+            let end = (start + chunk_size).min(query_count);
+            let positions = &query_id[start..end];
+            let phoneme_mask = Tensor::from_array(Array::from_shape_vec(
+                (positions.len(), label_count),
+                phoneme_masks[start * label_count..end * label_count].to_vec(),
+            )?)?;
+            let position_ids = Tensor::from_array(Array::from_vec(positions.to_vec()))?;
+            let char_ids = Tensor::from_array(Array::from_vec(chars_id[start..end].to_vec()))?;
 
-            let model_ouput = self.model.as_mut().unwrap().run(ort::inputs![
+            let started = Instant::now();
+            let model_output = self.model.as_mut().unwrap().run(ort::inputs![
                 "input_ids" => &input_ids,
                 "token_type_ids" => &token_type_ids,
                 "attention_mask" => &attention_mask,
                 "phoneme_mask"=> phoneme_mask,
-                "char_ids" => char_id,
-                "position_ids"=> position_id_t,
+                "char_ids" => char_ids,
+                "position_ids" => position_ids,
             ])?;
+            log::debug!("G2PW inference time: {:?}", started.elapsed());
 
-            let probs = model_ouput["probs"]
-                .try_extract_array::<f32>()
-                .unwrap()
-                .into_owned();
-
-            let probs_view = probs.view();
-
-            let i = argmax(&probs_view);
-
-            pre_data[*position_id - 1] = G2PWOut::Pinyin(POLY_LABLES[i.1 as usize].clone());
+            let probs = model_output["probs"]
+                .try_extract_array::<f32>()?
+                .into_dimensionality::<Ix2>()?;
+            anyhow::ensure!(
+                probs.dim() == (positions.len(), label_count),
+                "unexpected G2PW output shape"
+            );
+            for (&position, row) in positions.iter().zip(probs.rows()) {
+                let (_, label) = argmax(&row.insert_axis(Axis(0)).into_dyn());
+                pre_data[position as usize - 1] = G2PWOut::Pinyin(POLY_LABLES[label].clone());
+            }
         }
 
         Ok(pre_data)

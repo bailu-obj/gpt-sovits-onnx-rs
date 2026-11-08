@@ -2,6 +2,7 @@
 from typing import Optional, Tuple, List
 
 import torch
+from torch.onnx.symbolic_helper import _optional_input_placeholder_tensor, parse_args
 from torch import Tensor
 from torch.nn import Linear, Module
 from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
@@ -11,6 +12,35 @@ from torch.nn.parameter import Parameter
 from torch.nn import functional as F
 
 from AR.modules.patched_mha_with_cache_onnx import multi_head_attention_forward_patched
+
+
+class SharedKVAttention(torch.autograd.Function):
+    """CPU ONNX attention with aliased, head-major past and present caches."""
+
+    @staticmethod
+    def forward(ctx, qkv, key, value, past_length, total_length, heads, head_dim):
+        q, k, v = qkv.reshape(1, 1, 3, heads, head_dim).unbind(2)
+        q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
+        past = past_length[0]
+        key = torch.cat((key[:, :, :past], k, key[:, :, past + 1:]), dim=2)
+        value = torch.cat((value[:, :, :past], v, value[:, :, past + 1:]), dim=2)
+        attended = F.scaled_dot_product_attention(q, key[:, :, :past + 1], value[:, :, :past + 1])
+        return attended.transpose(1, 2).reshape(1, 1, heads * head_dim), key, value
+
+    @staticmethod
+    @parse_args("v", "v", "v", "v", "v", "i", "i")
+    def symbolic(graph, qkv, key, value, past_length, total_length, heads, head_dim):
+        unused = _optional_input_placeholder_tensor(graph)
+        output, present_key, present_value = graph.op(
+            "com.microsoft::GroupQueryAttention", qkv, unused, unused, key, value,
+            past_length, total_length, num_heads_i=heads, kv_num_heads_i=heads,
+            outputs=3,
+        )
+        return (
+            output.setType(qkv.type().with_sizes([1, 1, heads * head_dim])),
+            present_key.setType(key.type()),
+            present_value.setType(value.type()),
+        )
 
 
 class MultiheadAttention(Module):
@@ -153,10 +183,17 @@ class MultiheadAttention(Module):
         k_cache: Optional[Tensor] = None,
         v_cache: Optional[Tensor] = None,
         first_infer: bool = True,
+        cache_lengths: Optional[Tuple[Tensor, Tensor]] = None,
     ) -> Tuple[Tensor, Optional[Tensor], Tensor, Tensor]:
         batch_size = 1 # ONLY SUPPORT 1 NOW
-        q, k, v = F.linear(query, self.in_proj_weight,
-                         self.in_proj_bias).chunk(3, dim=-1)
+        projected = F.linear(query, self.in_proj_weight, self.in_proj_bias)
+        if cache_lengths is not None:
+            attn, key, value = SharedKVAttention.apply(
+                projected.unsqueeze(1), k_cache, v_cache, *cache_lengths,
+                self.num_heads, self.head_dim,
+            )
+            return F.linear(attn.squeeze(1), self.out_proj.weight, self.out_proj.bias), key, value
+        q, k, v = projected.split(self.embed_dim, dim=-1)
 
         # Update key and value with cache
         if k_cache is not None and v_cache is not None and not first_infer:
@@ -167,9 +204,9 @@ class MultiheadAttention(Module):
             v_cache = v
         q_len = q.shape[1]
         kv_len = k_cache.shape[1]
-        q = q.view(batch_size, q_len, self.num_heads, -1).transpose(1, 2)
-        k = k_cache.view(batch_size, kv_len, self.num_heads, -1).transpose(1, 2)
-        v = v_cache.view(batch_size, kv_len, self.num_heads, -1).transpose(1, 2)
+        q = q.view(batch_size, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k_cache.view(batch_size, kv_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v_cache.view(batch_size, kv_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         if first_infer:
             attn = F.scaled_dot_product_attention(q, k, v,  (~attn_mask))
