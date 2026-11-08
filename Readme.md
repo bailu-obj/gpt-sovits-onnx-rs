@@ -2,16 +2,18 @@
 
 一个基于 **Rust** 和 **ONNX Runtime** 的轻量级、跨平台 GPT-SoVITS TTS 推理引擎，专为在 **x86/ARM** 架构的 **CPU** 上运行而设计。
 
-## 推荐模型：官方 v2Pro quality
+## v2Pro 导出配置
 
 推荐从官方 `s1v3.ckpt` 与 `v2Pro/s2Gv2Pro.pth` 导出 v2Pro，使用 quality
 量化策略：仅 BERT/G2PW MatMul 权重 INT8，激活、T2S、VITS、SSL 和 SV 保持
-FP32。完整部署包含 `sv.onnx`，约 2.12 GiB；macOS 和 Android 使用同一套模型。
+FP32。完整模型包包含 `sv.onnx`，约 2.12 GiB，适用于 macOS 和 Android。
 参考音频应清晰、底噪低，并提供与实际音频逐字匹配的转录。
 请自行准备有权使用的参考音频，音色效果需在目标设备试听确认。
 
-推荐部署 v2Pro quality；本推理库仍支持 v2 / v2Pro / v2ProPlus 和其他量化策略。导出与量化步骤见
-[转换脚本说明](scripts/README.md)。动态长度掩码检查不可省略。
+Android 可选用 `--quant --profile mobile`，并搭配 `--shared-kv` 与 VITS
+校准输入导出 Galaxy S25 Ultra 验证过的低延迟配置。首次启用量化时，
+`05_export.sh --quant` 继续选用 `quality`。
+导出命令和各模型的精度见 [转换脚本说明](scripts/README.md#android-低延迟导出)。
 
 ## 项目简介
 
@@ -163,8 +165,7 @@ gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
 ./scripts/export/02_patch.sh
 ./scripts/export/03_setup_env.sh --source HF
 ./scripts/export/04_download_models.sh --version v2Pro
-./scripts/export/05_export.sh --version v2Pro --export-name v2pro --quant --profile quality \
-  --output-dir gpt-sovits-upstream/onnx-patched/v2pro-quality
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro-quality --quant --profile quality
 
 # v2ProPlus（与 v2Pro 共用 SV 分支，仅 SoVITS 权重不同）
 ./scripts/export/04_download_models.sh --version v2ProPlus
