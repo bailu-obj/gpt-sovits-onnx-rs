@@ -240,8 +240,8 @@ fn preprocess_golden_short_mandarin() {
 }
 
 #[test]
-fn preprocess_golden_short_en() {
-    assert_golden("嗯", 1, &[3, 3, 33, 140, 3]);
+fn preprocess_golden_short_mandarin_interjection() {
+    assert_golden("嗯", 1, &[3, 33, 140, 3]);
 }
 
 #[test]
@@ -286,10 +286,55 @@ fn preprocess_golden_decimal_yuan() {
         "价格是99.5元",
         1,
         &[
-            221, 174, 156, 131, 251, 214, 224, 202, 127, 178, 221, 217, 221, 218, 316, 257, 318,
+            221, 174, 156, 131, 251, 214, 221, 218, 251, 212, 221, 218, 127, 177, 316, 257, 318,
             302, 3,
         ],
     );
+}
+
+#[test]
+fn preprocess_mandarin_width_punctuation_and_percent() {
+    let mut tp = make_processor();
+    for (input, expected) in [
+        ("價格是９９．５元？", "价格是九十九点五元?"),
+        ("成長了５０％！", "成长了百分之五十!"),
+        ("下降了－０．０５％。", "下降了负百分之零点零五."),
+        ("我正在想……還是等等。", "我正在想…还是等等."),
+    ] {
+        let output = tp.get_phone_and_bert(input, LangId::Auto).unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].0, expected);
+    }
+}
+
+#[test]
+fn preprocess_mandarin_dates_times_and_numeric_expressions() {
+    let mut tp = make_processor();
+    for (input, expected) in [
+        ("预定在2026/01/02出发。", "预定在二零二六年一月二日出发."),
+        ("活动定于2026年11月9号。", "活动定于二零二六年十一月九号."),
+        ("系统日期为2026.11.09。", "系统日期为二零二六年十一月九日."),
+        (
+            "会议在08:30-12:45开始。",
+            "会议在八点半至十二点四十五分开始.",
+        ),
+        ("室外气温是-3℃。", "室外气温是零下三度."),
+        ("这段路长2km，面积是2m²。", "这段路长两千米,面积是两平方米."),
+        ("请拨打400-123-4567。", "请拨打四零零,幺二三,四五六七."),
+        ("快递编号是00078。", "快递编号是零零零七八."),
+        ("结果是2+3=5。", "结果是二加三等于五."),
+        ("比例是3/4。", "比例是四分之三."),
+        ("版本号是1.2.3。", "版本号是一点二点三."),
+        ("推荐区间为3~5天。", "推荐区间为三到五天."),
+        ("还有1002本书。", "还有一千零二本书."),
+        ("小数是.05。", ".小数是零点零五."),
+        ("标题写着②和α。", "标题写着二和阿尔法."),
+        ("公式是2²+3²。", "公式是二的二次方加三的二次方."),
+    ] {
+        let output = tp.get_phone_and_bert(input, LangId::Auto).unwrap();
+        assert_eq!(output.len(), 1, "{input}");
+        assert_eq!(output[0].0, expected, "{input}");
+    }
 }
 
 fn assert_golden(text: &str, expected_chunks: usize, expected_ids: &[i64]) {
@@ -354,8 +399,8 @@ fn preprocess_preserves_mixed_language_spaces() {
         .expect("mixed sentence should succeed");
     let norm = &result[0].0;
     assert!(
-        norm.contains(", 这是一个") || norm.contains(", 这"),
-        "space after comma before Chinese should be preserved, got {:?}",
+        norm.contains(",这是一个"),
+        "Mandarin whitespace should be removed as in Python, got {:?}",
         norm
     );
     assert!(

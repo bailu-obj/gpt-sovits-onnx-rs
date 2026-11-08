@@ -8,6 +8,14 @@ pub static LABELS: &str = include_str!("../../../resource/g2pw/dict_poly_index_l
 
 lazy_static::lazy_static! {
     pub static ref POLY_LABLES: Vec<String> = serde_json::from_str(LABELS).unwrap();
+    static ref SIMPLIFIED_TO_TRADITIONAL: std::collections::HashMap<char, char> =
+        include_str!("../../../resource/g2pw/bert-base-chinese_s2t_dict.txt")
+            .lines()
+            .filter_map(|line| {
+                let (from, to) = line.split_once('\t')?;
+                Some((from.chars().next()?, to.chars().next()?))
+            })
+            .collect();
 }
 
 #[derive(Clone)]
@@ -56,8 +64,10 @@ impl G2PW {
 
     pub fn g2p<'s>(&mut self, text: &'s str) -> Vec<G2PWOut> {
         if self.model.is_some() && self.tokenizers.is_some() {
-            self.get_pinyin_ml(text)
-                .unwrap_or_else(|_| self.simple_get_pinyin(text))
+            self.get_pinyin_ml(text).unwrap_or_else(|_| {
+                log::warn!("G2PW inference failed; using dictionary pronunciation");
+                self.simple_get_pinyin(text)
+            })
         } else {
             self.simple_get_pinyin(text)
         }
@@ -95,11 +105,24 @@ impl G2PW {
     }
 
     fn get_pinyin_ml<'s>(&mut self, text: &'s str) -> anyhow::Result<Vec<G2PWOut>> {
+        // Upstream G2PW uses traditional context. Keep source text for word
+        // segmentation and preserve one output slot per original character.
+        let context: String = text
+            .chars()
+            // The generic map folds 幺 into 么, which changes phone-number 一 to me5.
+            .map(|c| {
+                if c == '幺' {
+                    c
+                } else {
+                    SIMPLIFIED_TO_TRADITIONAL.get(&c).copied().unwrap_or(c)
+                }
+            })
+            .collect();
         let c = self
             .tokenizers
             .as_ref()
             .unwrap()
-            .encode(text, true)
+            .encode(context.as_str(), true)
             .map_err(|e| anyhow::anyhow!("encode error: {}", e))?;
         let input_ids = c.get_ids().iter().map(|x| *x as i64).collect::<Vec<i64>>();
         let token_type_ids = vec![0i64; input_ids.len()];
@@ -110,7 +133,7 @@ impl G2PW {
         let mut query_id = vec![];
         let mut chars_id = vec![];
 
-        for (i, c) in text.chars().enumerate() {
+        for (i, (original, c)) in text.chars().zip(context.chars()).enumerate() {
             if let Some(mono) = DICT_MONO_CHARS.get(&c) {
                 pre_data.push(G2PWOut::Pinyin(mono.phone.clone()));
             } else if let Some(poly) = DICT_POLY_CHARS.get(&c) {
@@ -124,7 +147,7 @@ impl G2PW {
                 }
                 phoneme_masks.extend(phoneme_mask);
             } else {
-                pre_data.push(G2PWOut::RawChar(c));
+                pre_data.push(G2PWOut::RawChar(original));
             }
         }
         if query_id.is_empty() {

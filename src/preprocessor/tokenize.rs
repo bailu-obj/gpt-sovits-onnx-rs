@@ -8,8 +8,10 @@ pub(crate) static TOKEN_REGEX: Lazy<Regex> = Lazy::new(|| {
         r#"(?x)
         [\p{Han}]+ |              # Chinese characters
         [a-zA-Z]+(?:['-][a-zA-Z]+)* | # English words with optional apostrophes/hyphens
-        \d+(?:\.\d+)? |          # Numbers (including decimals)
-        [.,!?;:()\[\]<>\-\"$/\u{3001}\u{3002}\u{FF01}\u{FF1F}\u{FF1B}\u{FF1A}\u{FF0C}\u{2018}\u{2019}\u{201C}\u{201D}] | # Punctuation
+        [+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)%? | # Numbers, decimals and percentages
+        °C | # Temperature suffix
+        \p{Greek} |
+        [.,!?;:()\[\]<>\-\"$/…~+×÷=⁰¹²³⁴-⁹ˣʸⁿ①-⑩℃\u{3001}\u{3002}\u{FF01}\u{FF1F}\u{FF1B}\u{FF1A}\u{FF0C}\u{2018}\u{2019}\u{201C}\u{201D}] | # Punctuation
         \s+                      # Whitespace
         "#,
     )

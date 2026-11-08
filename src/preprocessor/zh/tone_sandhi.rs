@@ -47,11 +47,17 @@ impl ToneSandhi {
         self.merge_er(seg)
     }
 
-    pub fn modified_tone(&self, word: &str, pos: &str, finals: Vec<String>) -> Vec<String> {
+    pub fn modified_tone(
+        &self,
+        word: &str,
+        pos: &str,
+        finals: Vec<String>,
+        jieba: &Jieba,
+    ) -> Vec<String> {
         let finals = self.bu_sandhi(word, finals);
         let finals = self.yi_sandhi(word, finals);
         let finals = self.neural_sandhi(word, pos, finals);
-        self.three_sandhi(word, finals)
+        self.three_sandhi(word, finals, jieba)
     }
 
     fn neural_sandhi(&self, word: &str, pos: &str, mut finals: Vec<String>) -> Vec<String> {
@@ -119,6 +125,17 @@ impl ToneSandhi {
                     last.push('5');
                 }
             }
+        }
+
+        if let Some(index) = chars.iter().position(|&c| c == '个')
+            && (word == "个"
+                || index > 0
+                    && "零一二三四五六七八九十百千万亿几有两半多各整每做是"
+                        .contains(chars[index - 1]))
+            && let Some(tone) = finals.get_mut(index).filter(|tone| tone.len() >= 2)
+        {
+            tone.pop();
+            tone.push('5');
         }
 
         if MUST_NEURAL.contains(word) || MUST_NEURAL.iter().any(|w| word.ends_with(w)) {
@@ -207,15 +224,52 @@ impl ToneSandhi {
         finals
     }
 
-    fn three_sandhi(&self, word: &str, mut finals: Vec<String>) -> Vec<String> {
-        let chars: Vec<char> = word.chars().collect();
-        if chars.len() == 2 && all_tone_three(&finals) {
-            if let Some(f) = finals.get_mut(0) {
-                if f.len() >= 2 {
-                    f.truncate(f.len() - 1);
-                    f.push('2');
+    fn three_sandhi(&self, word: &str, mut finals: Vec<String>, jieba: &Jieba) -> Vec<String> {
+        if word.chars().count() != finals.len() {
+            return finals;
+        }
+        match finals.as_mut_slice() {
+            pair @ [_, _] => raise_third_tone_pair(pair),
+            triple @ [_, _, _] => {
+                let Some(shortest) = jieba
+                    .cut_for_search(word, true)
+                    .into_iter()
+                    .min_by_key(|part| part.chars().count())
+                else {
+                    return finals;
+                };
+                let len = shortest.chars().count();
+                let boundary = if word.starts_with(shortest) {
+                    len
+                } else {
+                    3 - len
+                };
+                if boundary == 0 || boundary >= 3 {
+                    return finals;
+                }
+                if all_tone_three(triple) {
+                    if boundary == 2 {
+                        raise_third_tone(&mut triple[0]);
+                    }
+                    raise_third_tone(&mut triple[1]);
+                } else {
+                    let (left, right) = triple.split_at_mut(boundary);
+                    raise_third_tone_pair(left);
+                    if right.len() == 2 && all_tone_three(right) {
+                        raise_third_tone(&mut right[0]);
+                    } else if !all_tone_three(right) && right[0].ends_with('3') {
+                        if let Some(last) = left.last_mut().filter(|tone| tone.ends_with('3')) {
+                            raise_third_tone(last);
+                        }
+                    }
                 }
             }
+            four @ [_, _, _, _] => {
+                let (left, right) = four.split_at_mut(2);
+                raise_third_tone_pair(left);
+                raise_third_tone_pair(right);
+            }
+            _ => {}
         }
         finals
     }
@@ -353,6 +407,17 @@ impl ToneSandhi {
 
 fn all_tone_three(finals: &[String]) -> bool {
     finals.iter().all(|f| f.ends_with('3'))
+}
+
+fn raise_third_tone_pair(finals: &mut [String]) {
+    if finals.len() == 2 && all_tone_three(finals) {
+        raise_third_tone(&mut finals[0]);
+    }
+}
+
+fn raise_third_tone(final_tone: &mut String) {
+    final_tone.pop();
+    final_tone.push('2');
 }
 
 fn is_reduplication(word: &str) -> bool {

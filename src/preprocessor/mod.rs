@@ -56,20 +56,14 @@ impl TextProcessor {
         text: &str,
         lang_id: LangId,
     ) -> Result<Vec<(String, Vec<i64>, Array2<f32>)>> {
-        let cleaned = normalize_input(text)?;
-        let lang_en = infer_lang_en(&cleaned.text);
-        debug!("Cleaned text: {}", cleaned.text);
-        let chunks = pre_seg_text(&cleaned.text, lang_en);
+        let chunks = pre_seg_text(text, infer_lang_en(text));
         let mut result: Vec<(String, Vec<i64>, ArrayBase<OwnedRepr<f32>, Dim<[usize; 2]>>)> =
             Vec::with_capacity(chunks.len());
 
         for chunk in chunks {
             debug!("Processing chunk: {}", chunk);
-            if chunk.trim().is_empty() {
-                continue;
-            }
-
-            match self.process_chunk(&cleaned, &chunk, lang_id, false) {
+            let cleaned = normalize_input(&chunk)?;
+            match self.process_chunk(&cleaned, &cleaned.text, lang_id, false) {
                 Ok(Some(output)) => result.push((output.norm_text, output.phone_ids, output.bert)),
                 Ok(None) => {}
                 Err(e) => warn!("Failed to process chunk '{}': {}", chunk, e),

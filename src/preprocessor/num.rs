@@ -51,61 +51,53 @@ pub mod zh {
         Ok(())
     }
 
-    static UNITS: [&str; 4] = ["", "十", "百", "千"];
-    static BASE_UNITS: [&str; 4] = ["", "万", "亿", "万"];
+    const DIGITS: [char; 10] = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+    const UNITS: [(usize, char); 5] = [(8, '亿'), (4, '万'), (3, '千'), (2, '百'), (1, '十')];
+
+    fn append_cardinal(value: &str, output: &mut String) {
+        let significant = value.trim_start_matches('0');
+        match significant.len() {
+            0 => {}
+            1 => {
+                if significant.len() < value.len() {
+                    output.push('零');
+                }
+                output.push(DIGITS[(significant.as_bytes()[0] - b'0') as usize]);
+            }
+            _ => {
+                let (power, unit) = UNITS
+                    .iter()
+                    .copied()
+                    .find(|&(power, _)| power < significant.len())
+                    .unwrap();
+                let (head, tail) = value.split_at(value.len() - power);
+                append_cardinal(head, output);
+                output.push(unit);
+                append_cardinal(tail, output);
+            }
+        }
+    }
 
     fn parse_integer(pair: Pair<Rule>, dst_string: &mut String, unit: bool) -> Result<()> {
         assert_eq!(pair.as_rule(), Rule::integer);
-
-        let digits: Vec<_> = pair.into_inner().collect(); // Remove .rev() to process left-to-right
-        let mut result = String::new();
-        let mut has_non_zero = false;
-
-        for (i, pair) in digits.iter().enumerate() {
-            let txt = match pair.as_str() {
-                "0" => "零",
-                "1" => "一",
-                "2" => "二",
-                "3" => "三",
-                "4" => "四",
-                "5" => "五",
-                "6" => "六",
-                "7" => "七",
-                "8" => "八",
-                "9" => "九",
-                _ => bail!("Unknown digit: {:?}", pair.as_str()),
-            };
-            // Calculate the position from most significant digit
-            let pos = digits.len() - 1 - i;
-            let u = if pos % 4 != 0 {
-                UNITS[pos % 4]
-            } else {
-                BASE_UNITS[(pos / 4) % 4]
-            };
-
-            if txt != "零" {
-                has_non_zero = true;
-                // Skip "一" for tens place (pos == 1) when the digit is 1
-                if !(pos == 1 && txt == "一") {
-                    result.push_str(txt);
-                }
-                if unit {
-                    result.push_str(u);
-                }
-            } else if has_non_zero && unit && pos > 0 {
-                result.push_str(txt);
-            }
+        let value = pair.as_str();
+        if !unit {
+            dst_string.extend(value.bytes().map(|byte| DIGITS[(byte - b'0') as usize]));
+            return Ok(());
         }
 
-        if result.is_empty() {
-            dst_string.push_str("零");
+        let value = value.trim_start_matches('0');
+        if value.is_empty() {
+            dst_string.push('零');
+            return Ok(());
+        }
+        let mut cardinal = String::new();
+        append_cardinal(value, &mut cardinal);
+        dst_string.push_str(if cardinal.starts_with("一十") {
+            cardinal.strip_prefix('一').unwrap()
         } else {
-            if result.ends_with("零") {
-                result.truncate(result.len() - "零".len());
-            }
-            dst_string.push_str(&result);
-        }
-
+            &cardinal
+        });
         Ok(())
     }
 

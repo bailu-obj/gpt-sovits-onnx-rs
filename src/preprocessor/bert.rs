@@ -37,7 +37,6 @@ impl BertModel {
         lang: lang::Lang,
     ) -> anyhow::Result<Array2<f32>> {
         if self.model.is_some() && self.tokenizers.is_some() && lang == lang::Lang::Zh {
-            let text = &text.replace(",", ".");
             let tmp = self.get_real_bert(text, word2ph)?;
             debug!("use real bert, {}", text);
             if tmp.shape()[0] != total_phones {

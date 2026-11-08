@@ -121,11 +121,16 @@ fn load_polyphonic_dict() -> HashMap<String, Vec<String>> {
         include_str!("../../../resource/polyphonic-fix.rep"),
     ] {
         for line in content.lines() {
-            if let Some((key, value_str)) = line.split_once(':') {
-                if let Ok(value) = serde_json::from_str::<Vec<String>>(value_str.trim()) {
-                    dict.insert(key.trim().to_string(), value);
-                }
-            }
+            let (word, list) = line.split_once(':').expect("embedded pronunciation entry");
+            // The upstream resources use Python string literals with single quotes.
+            let pinyins = serde_json::from_str::<Vec<String>>(&list.trim().replace('\'', "\""))
+                .expect("embedded pronunciation list");
+            assert_eq!(
+                word.trim().chars().count(),
+                pinyins.len(),
+                "pronunciation for {word}"
+            );
+            dict.insert(word.trim().to_owned(), pinyins);
         }
     }
     dict
@@ -206,7 +211,7 @@ pub fn g2p_mandarin(text: &str, g2pw: &mut G2PW, jieba: &Jieba) -> G2pResult {
             }
 
             pre_word_length = now_word_length;
-            let sub_finals = tone_modifier.modified_tone(&word, &pos, sub_finals);
+            let sub_finals = tone_modifier.modified_tone(&word, &pos, sub_finals, jieba);
             let (sub_initials, sub_finals) = merge_erhua(sub_initials, sub_finals, &word, &pos);
             initials.push(sub_initials);
             finals.push(sub_finals);
@@ -414,8 +419,16 @@ mod tests {
 
     #[test]
     fn test_correct_pronunciation_dict() {
-        let result = correct_pronunciation("行", vec!["xing2".to_string()]);
-        assert!(!result.is_empty());
+        for (word, input, expected) in [
+            ("湖泊", ["hu2", "bo2"], ["hu2", "po1"]),
+            ("重庆", ["zhong4", "qing4"], ["chong2", "qing4"]),
+            ("银行", ["yin2", "xing2"], ["yin2", "hang2"]),
+        ] {
+            assert_eq!(
+                correct_pronunciation(word, input.map(str::to_owned).to_vec()),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -1,17 +1,10 @@
-// Python-compatible text segmentation (TextPreprocessor.pre_seg_text + text_segmentation_method)
+// Sentence boundaries for inference and punctuation cleanup for phonemization.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 
 pub const SPLITS: &[char] = &[
     '，', '。', '？', '！', ',', '.', '?', '!', '~', ':', '：', '—', '…',
 ];
-
-static PURE_SYMBOL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\W+$").unwrap());
-
-fn is_split(c: char) -> bool {
-    SPLITS.contains(&c)
-}
 
 /// Collapse consecutive punctuation (Python `replace_consecutive_punctuation`).
 pub fn replace_consecutive_punctuation(text: &str) -> String {
@@ -25,172 +18,205 @@ pub fn replace_consecutive_punctuation(text: &str) -> String {
     re.replace_all(text, "$1").into_owned()
 }
 
-/// Python `split_big_text(max_len=510)`
-pub fn split_big_text(text: &str, max_len: usize) -> Vec<String> {
-    let punctuation: String = SPLITS.iter().collect();
-    let re = Regex::new(&format!("([{punctuation}])")).unwrap();
-    let segments: Vec<&str> = re.split(text).collect();
+const MAX_CHARS: usize = 510;
 
-    let mut result = Vec::new();
-    let mut current = String::new();
-
-    for segment in segments {
-        if current.chars().count() + segment.chars().count() > max_len {
-            if !current.is_empty() {
-                result.push(current.clone());
-            }
-            current = segment.to_string();
-        } else {
-            current.push_str(segment);
-        }
-    }
-    if !current.is_empty() {
-        result.push(current);
-    }
-    result
+fn sentence_end(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '．' | '.' | '!' | '?' | '…')
 }
 
-/// Python `merge_short_text_in_array(texts, threshold)`
-pub fn merge_short_text_in_array(texts: &[String], threshold: usize) -> Vec<String> {
-    if texts.len() < 2 {
-        return texts.to_vec();
-    }
-    let mut result = Vec::new();
-    let mut text = String::new();
-    for ele in texts {
-        text.push_str(ele);
-        if text.chars().count() >= threshold {
-            result.push(text.clone());
-            text.clear();
-        }
-    }
-    if !text.is_empty() {
-        if result.is_empty() {
-            result.push(text);
-        } else {
-            let last = result.len() - 1;
-            result[last].push_str(&text);
-        }
-    }
-    result
+fn closer(c: char) -> bool {
+    matches!(
+        c,
+        '”' | '’' | '"' | '\'' | '」' | '』' | '》' | '）' | ')' | '】' | ']'
+    )
 }
 
-fn get_first_segment(text: &str) -> String {
-    let pattern: String = SPLITS
-        .iter()
-        .map(|c| regex::escape(&c.to_string()))
+fn ascii_word(chars: impl Iterator<Item = char>) -> String {
+    chars.take_while(char::is_ascii_alphabetic).collect()
+}
+
+fn decimal_digit(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, '０'..='９')
+}
+
+fn internal_period(chars: &[char], index: usize, following: &[char]) -> bool {
+    if chars.get(index + 1).is_some_and(|&c| decimal_digit(c))
+        && (index == 0
+            || !chars[index - 1].is_ascii_alphabetic()
+                && !matches!(chars[index - 1], '。' | '.' | '．'))
+    {
+        return true;
+    }
+    let Some(&previous) = chars[..index].last() else {
+        return false;
+    };
+    let Some(&next) = following.first() else {
+        return false;
+    };
+    if chars.get(index + 1).is_some_and(|&immediate| {
+        previous.is_ascii_alphanumeric() && immediate.is_ascii_lowercase()
+    }) {
+        return true;
+    }
+
+    let word: String = ascii_word(chars[..index].iter().rev().copied())
+        .chars()
+        .rev()
         .collect();
-    let re = Regex::new(&format!("[{pattern}]")).unwrap();
-    re.split(text).next().unwrap_or("").trim().to_string()
+    let abbreviation = word.to_ascii_lowercase();
+    if matches!(
+        abbreviation.as_str(),
+        "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "st" | "vs" | "no" | "fig"
+    ) {
+        return next.is_ascii_alphanumeric();
+    }
+
+    let dotted = word.len() == 1
+        && index >= 3
+        && chars[index - 2] == '.'
+        && chars[index - 3].is_ascii_alphabetic();
+    if dotted {
+        if chars.get(index + 1).is_some_and(char::is_ascii_alphabetic) || next.is_ascii_lowercase()
+        {
+            return true;
+        }
+        return matches!(
+            (
+                chars[index - 3].to_ascii_lowercase(),
+                previous.to_ascii_lowercase()
+            ),
+            ('e', 'g') | ('i', 'e')
+        ) && next.is_ascii_alphanumeric();
+    }
+    word.len() == 1 && previous.is_ascii_uppercase() && next.is_ascii_uppercase()
 }
 
-fn filter_text(texts: &[String]) -> Vec<String> {
-    texts
+fn inside_url(chars: &[char], index: usize) -> bool {
+    if !matches!(chars[index], '.' | '?' | '!')
+        || !chars
+            .get(index + 1)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '%' | '#' | '_'))
+    {
+        return false;
+    }
+    let start = chars[..index]
         .iter()
-        .filter(|t| !t.trim().is_empty())
-        .cloned()
-        .collect()
+        .rposition(|c| c.is_whitespace() || matches!(c, '(' | '"' | '“' | '「'))
+        .map_or(0, |position| position + 1);
+    let prefix: String = chars[start..index].iter().take(8).collect();
+    prefix.starts_with("https://") || prefix.starts_with("http://") || prefix.starts_with("www")
 }
 
-fn is_pure_symbols(text: &str) -> bool {
-    PURE_SYMBOL_RE.is_match(text)
+fn push_sentence(out: &mut Vec<String>, chars: &[char]) {
+    if chars
+        .iter()
+        .any(|c| c.is_alphanumeric() || matches!(c, '￥' | '^'))
+    {
+        out.push(chars.iter().collect::<String>().trim().to_owned());
+    }
 }
 
-fn has_content(text: &str) -> bool {
-    text.chars()
-        .any(|c| c.is_alphanumeric() || matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF))
-}
-
-fn is_decimal_point(chars: &[char], idx: usize) -> bool {
-    chars[idx] == '.'
-        && idx > 0
-        && idx + 1 < chars.len()
-        && chars[idx - 1].is_ascii_digit()
-        && chars[idx + 1].is_ascii_digit()
-}
-
-/// Split on sentence-ending punctuation without treating decimal points or
-/// short-text prefix punctuation as standalone sentences.
-pub fn split_sentence_chunks(line: &str) -> Vec<String> {
+fn split_sentence_chunks(line: &str) -> Vec<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut out = Vec::new();
-    let mut current = String::new();
-
-    for (idx, &c) in chars.iter().enumerate() {
-        current.push(c);
-        if !matches!(c, '。' | '！' | '？' | '.' | '!' | '?') || is_decimal_point(&chars, idx) {
+    let (mut start, mut index, mut parentheses) = (0, 0, 0usize);
+    while index < chars.len() {
+        let c = chars[index];
+        match c {
+            '(' | '（' | '[' | '【' => parentheses += 1,
+            ')' | '）' | ']' | '】' => parentheses = parentheses.saturating_sub(1),
+            _ => {}
+        }
+        if parentheses > 0 || !sentence_end(c) || inside_url(&chars, index) {
+            index += 1;
             continue;
         }
-        if !has_content(&current) {
-            continue;
-        }
 
-        let trimmed = current.trim();
-        if !trimmed.is_empty() && !is_pure_symbols(trimmed) {
-            out.push(trimmed.to_string());
+        let mut end = index + 1;
+        while end < chars.len() && sentence_end(chars[end]) {
+            end += 1;
         }
-        current.clear();
-    }
-
-    let tail = current.trim();
-    if !tail.is_empty() && !is_pure_symbols(tail) {
-        out.push(tail.to_string());
-    }
-    if out.is_empty() {
-        let whole = line.trim();
-        if !whole.is_empty() && !is_pure_symbols(whole) {
-            out.push(whole.to_string());
+        let terminal_end = end;
+        while end < chars.len() && closer(chars[end]) {
+            end += 1;
         }
+        let following_start = chars[end..]
+            .iter()
+            .position(|c| !c.is_whitespace())
+            .map_or(chars.len(), |position| end + position);
+        let following = &chars[following_start..];
+        let next = following.first().copied();
+        let internal = (matches!(c, '.' | '．')
+            && terminal_end == index + 1
+            && internal_period(&chars, index, following))
+            || ((c == '…' || (c == '.' && terminal_end - index >= 3))
+                && next.is_some_and(|next| next.is_alphabetic() && !next.is_uppercase()))
+            || (end > terminal_end
+                && next.is_some_and(|next| {
+                    matches!(next, ',' | '，' | ';' | '；' | '—') || next.is_ascii_lowercase()
+                }));
+        if !internal && chars[start..index].iter().any(|c| c.is_alphanumeric()) {
+            push_sentence(&mut out, &chars[start..end]);
+            start = end;
+        }
+        index = if internal { index + 1 } else { end };
     }
+    push_sentence(&mut out, &chars[start..]);
     out
 }
 
-/// Python `TextPreprocessor.pre_seg_text` (default cut0-style: newline split + merge)
+fn bounded_chunks(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut remaining = chars.as_slice();
+    let mut chunks = Vec::new();
+    while remaining.len() > MAX_CHARS {
+        // Reserve one character for punctuation on a forced break.
+        let cap = MAX_CHARS - 1;
+        let tail = &remaining[cap / 2..cap];
+        let boundary = tail
+            .iter()
+            .rposition(|c| matches!(c, ',' | '，' | ';' | '；' | ':' | '：'))
+            .or_else(|| tail.iter().rposition(|c| c.is_whitespace()))
+            .map_or(cap, |position| cap / 2 + position + 1);
+        push_sentence(&mut chunks, &remaining[..boundary]);
+        remaining = &remaining[boundary..];
+    }
+    push_sentence(&mut chunks, remaining);
+    chunks
+}
+
+/// Preserve complete sentences before punctuation and language normalization.
 pub fn pre_seg_text(text: &str, lang_en: bool) -> Vec<String> {
-    let mut text = text.trim().to_string();
-    if text.is_empty() {
-        return vec![];
-    }
-
-    if !text.chars().next().map_or(false, |c| is_split(c))
-        && get_first_segment(&text).chars().count() < 4
-    {
-        if lang_en {
-            text = format!(".{text}");
-        } else {
-            text = format!("。{text}");
-        }
-    }
-
-    while text.contains("\n\n") {
-        text = text.replace("\n\n", "\n");
-    }
-
-    let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
-    let lines = filter_text(&lines);
-    let lines = merge_short_text_in_array(&lines, 5);
-
-    let mut texts = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() || is_pure_symbols(&line) {
-            continue;
-        }
-        for mut chunk in split_sentence_chunks(&line) {
-            if !chunk.chars().last().map_or(false, is_split) {
-                if lang_en {
-                    chunk.push('.');
-                } else {
-                    chunk.push('。');
+    let terminator = if lang_en { '.' } else { '。' };
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut chunks = Vec::new();
+    for paragraph in text.split("\n\n") {
+        for sentence in split_sentence_chunks(&paragraph.replace('\n', " ")) {
+            for mut chunk in bounded_chunks(&sentence) {
+                if !chunk
+                    .chars()
+                    .rev()
+                    .find(|&c| !closer(c))
+                    .is_some_and(sentence_end)
+                {
+                    chunk.push(terminator);
                 }
-            }
-            if chunk.chars().count() > 510 {
-                texts.extend(split_big_text(&chunk, 510));
-            } else {
-                texts.push(chunk);
+                if chunks.is_empty()
+                    && chunk
+                        .chars()
+                        .take_while(|c| !SPLITS.contains(c) && !matches!(c, '￥' | '^'))
+                        .count()
+                        < 4
+                    && !chunk.chars().next().is_some_and(|c| SPLITS.contains(&c))
+                    && chunk.chars().count() < MAX_CHARS
+                {
+                    chunk.insert(0, terminator);
+                }
+                chunks.push(chunk);
             }
         }
     }
-    texts
+    chunks
 }
 
 #[cfg(test)]
@@ -230,5 +256,54 @@ mod tests {
                 .any(|c| c.contains("This demo is only for test"))
         );
         assert!(chunks.iter().any(|c| c.contains("If you find any 问题")));
+    }
+
+    #[test]
+    fn english_abbreviations_decimals_and_urls_stay_inside_the_sentence() {
+        assert_eq!(
+            split_sentence_chunks(
+                "Dr. J. Smith paid 3.14 in the U.S. last week. Try e.g. https://example.com?q=1. Next sentence."
+            ),
+            [
+                "Dr. J. Smith paid 3.14 in the U.S. last week.",
+                "Try e.g. https://example.com?q=1.",
+                "Next sentence."
+            ]
+        );
+        assert_eq!(
+            split_sentence_chunks("We met at 9 a.m. Then we left."),
+            ["We met at 9 a.m.", "Then we left."]
+        );
+    }
+
+    #[test]
+    fn quotes_pauses_and_line_wrapping_keep_their_context() {
+        assert_eq!(
+            pre_seg_text(
+                "他说：“价格是99.5元，你要买吗？”\n我想……先等等！\n\nShe asked “Why?” quietly. “Ready?!” Then we left.",
+                false
+            ),
+            [
+                "。他说：“价格是99.5元，你要买吗？”",
+                "我想……先等等！",
+                "She asked “Why?” quietly.",
+                "“Ready?!”",
+                "Then we left."
+            ]
+        );
+        assert_eq!(
+            pre_seg_text("This sentence\nwraps on screen.", true),
+            ["This sentence wraps on screen."]
+        );
+    }
+
+    #[test]
+    fn splits_long_sentences_at_clauses_without_discarding_punctuation() {
+        let left = "甲".repeat(300);
+        let right = "乙".repeat(260);
+        assert_eq!(
+            pre_seg_text(&format!("{left}，{right}。"), false),
+            [format!("{left}，。"), format!("{right}。")]
+        );
     }
 }

@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::tokenize::{HAN_ONLY, TOKEN_REGEX};
+use super::zh::number_normalization::{is_numeric_unit, spoken_symbol};
 
 #[derive(Debug, Clone)]
 pub struct LangSpan {
@@ -22,11 +23,12 @@ enum RawLang {
     Unknown,
 }
 
-static DIGIT_ONLY: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\d+(?:\.\d+)?%?$").unwrap());
+static DIGIT_ONLY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)%?$").unwrap());
 static ASCII_WORD: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z]+(?:['-][a-zA-Z]+)*$").unwrap());
 
-const PUNCT_CHARS: &[char] = &['，', '。', '！', '？', ',', '.', '!', '?'];
+const PUNCT_CHARS: &[char] = &['，', '。', '！', '？', ',', '.', '!', '?', '…'];
 
 /// Segment text into language spans (Python `LangSegmenter.getTexts` for auto mode).
 pub fn get_spans(text: &str, jieba: &Jieba) -> Vec<LangSpan> {
@@ -37,6 +39,7 @@ pub fn get_spans(text: &str, jieba: &Jieba) -> Vec<LangSpan> {
 
 fn tokenize_raw(text: &str, jieba: &Jieba) -> Vec<(RawLang, String)> {
     let mut spans: Vec<(RawLang, String)> = Vec::new();
+    let has_mandarin = text.chars().any(is_han);
     for m in TOKEN_REGEX.find_iter(text) {
         let token = m.as_str();
         if token.chars().all(|c| c.is_whitespace()) {
@@ -59,6 +62,12 @@ fn tokenize_raw(text: &str, jieba: &Jieba) -> Vec<(RawLang, String)> {
             }
         } else if DIGIT_ONLY.is_match(token) {
             push_raw(&mut spans, RawLang::Digit, token);
+        } else if has_mandarin
+            && is_numeric_unit(token)
+            && let Some((RawLang::Digit, number)) = spans.last_mut()
+            && number.trim_end().ends_with(|c: char| c.is_ascii_digit())
+        {
+            number.push_str(token);
         } else if ASCII_WORD.is_match(token) {
             push_raw(&mut spans, RawLang::En, token);
         } else if is_punct_token(token) {
@@ -162,7 +171,7 @@ fn assign_digit_lang_v2(spans: Vec<(RawLang, String)>) -> Vec<(Lang, String)> {
     }
 
     for i in 0..n {
-        if full_en(&spans[i].1) {
+        if spans[i].0 != RawLang::Digit && full_en(&spans[i].1) {
             langs[i] = Lang::En;
         }
     }
@@ -255,9 +264,29 @@ fn is_han(c: char) -> bool {
 fn is_punct_token(token: &str) -> bool {
     token.chars().all(|c| {
         PUNCT_CHARS.contains(&c)
+            || spoken_symbol(c).is_some()
             || matches!(
                 c,
-                ';' | ':' | '(' | ')' | '[' | ']' | '<' | '>' | '-' | '~' | '$' | '/'
+                ';' | ':'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '<'
+                    | '>'
+                    | '-'
+                    | '~'
+                    | '$'
+                    | '/'
+                    | '+'
+                    | '×'
+                    | '÷'
+                    | '='
+                    | '⁰'
+                    | '¹'
+                    | '²'
+                    | '³'
+                    | '⁴'..='⁹' | 'ˣ' | 'ʸ' | 'ⁿ' | '℃'
             )
     })
 }

@@ -5,6 +5,7 @@ use crate::preprocessor::zh::{g2pw::G2PW, mandarin_g2p::G2pResult};
 pub mod g2pw;
 mod jyutping_list;
 pub mod mandarin_g2p;
+pub(super) mod number_normalization;
 pub mod split;
 pub mod tone_sandhi;
 pub mod yue;
