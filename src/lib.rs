@@ -96,14 +96,21 @@ fn take_kv_pair(
 pub struct ReferenceData {
     ref_seq: Array2<i64>,
     ref_bert: Array2<f32>,
-    ref_audio_32k: Array2<f32>,
+    vits: VitsReference,
     ssl_content: ArrayBase<OwnedRepr<f32>, IxDyn>,
     sv_emb: Option<ArrayD<f32>>,
+}
+
+#[derive(Clone)]
+enum VitsReference {
+    Audio(Array2<f32>),
+    Features(ArrayD<f32>),
 }
 
 pub struct TTSModel {
     text_processor: TextProcessor,
     sovits: Session,
+    sovits_reference: Option<Session>,
     ssl: Session,
     t2s_encoder: Session,
     t2s_fs_decoder: Session,
@@ -170,13 +177,27 @@ impl TTSModel {
         let (t2s_dec_ik, t2s_dec_iv, t2s_k_cache_out, t2s_v_cache_out) =
             t2s_kv_io_names(num_layers);
 
+        let sovits_path = sovits_path.as_ref();
+        let sovits = create_onnx_cpu_session(sovits_path)?;
+        let sovits_reference = if sovits.inputs().iter().any(|input| input.name() == "ge") {
+            if sv_path.is_none() {
+                return Err(GSVError::from("Split SoVITS requires an SV model"));
+            }
+            Some(create_onnx_cpu_session(
+                sovits_path.with_file_name("vits_ref.onnx"),
+            )?)
+        } else {
+            None
+        };
+
         Ok(TTSModel {
             text_processor: TextProcessor::new(
                 G2PW::new(g2pw_path)?,
                 G2pEn::new(g2p_en_path)?,
                 BertModel::new(bert_path)?,
             )?,
-            sovits: create_onnx_cpu_session(sovits_path)?,
+            sovits,
+            sovits_reference,
             ssl: create_onnx_cpu_session(ssl_path)?,
             t2s_encoder: create_onnx_cpu_session(t2s_encoder_path)?,
             t2s_fs_decoder: create_onnx_cpu_session(t2s_fs_decoder_path)?,
@@ -252,11 +273,31 @@ impl TTSModel {
             }
         };
 
+        let vits = if let Some(reference) = &mut self.sovits_reference {
+            let sv_emb = sv_emb
+                .as_ref()
+                .ok_or_else(|| GSVError::from("Missing SV embedding for SoVITS reference"))?;
+            let outputs = reference.run(inputs![
+                "ref_audio" => TensorRef::from_array_view(&ref_audio_32k)?,
+                "sv_emb" => TensorRef::from_array_view(sv_emb)?,
+            ])?;
+            let ge = outputs
+                .get("ge")
+                .ok_or_else(|| GSVError::from("Missing SoVITS reference output ge"))?
+                .try_extract_array::<f32>()?;
+            if ge.is_empty() || !ge.iter().all(|value| value.is_finite()) {
+                return Err(GSVError::from("Invalid SoVITS reference features"));
+            }
+            VitsReference::Features(ge.into_owned())
+        } else {
+            VitsReference::Audio(ref_audio_32k)
+        };
+
         self.ref_data = Some(Arc::new(ReferenceData {
             ref_seq,
             ref_bert,
             sv_emb,
-            ref_audio_32k,
+            vits,
             ssl_content,
         }));
 
@@ -690,18 +731,22 @@ impl TTSModel {
         debug!("T2S S Decoder all time: {:?}", time.elapsed()?);
 
         let time = SystemTime::now();
-        // use sv_emb if have
-        let outputs = match &ref_data.sv_emb {
-            Some(sv_emb) => self.sovits.run(inputs![
+        let outputs = match (&ref_data.vits, &ref_data.sv_emb) {
+            (VitsReference::Features(ge), _) => self.sovits.run(inputs![
                 "text_seq" => TensorRef::from_array_view(text_seq)?,
                 "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
-                "ref_audio" => TensorRef::from_array_view(&ref_data.ref_audio_32k)?,
+                "ge" => TensorRef::from_array_view(ge)?,
+            ])?,
+            (VitsReference::Audio(audio), Some(sv_emb)) => self.sovits.run(inputs![
+                "text_seq" => TensorRef::from_array_view(text_seq)?,
+                "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
+                "ref_audio" => TensorRef::from_array_view(audio)?,
                 "sv_emb" => TensorRef::from_array_view(sv_emb)?,
             ])?,
-            None => self.sovits.run(inputs![
+            (VitsReference::Audio(audio), None) => self.sovits.run(inputs![
                 "text_seq" => TensorRef::from_array_view(text_seq)?,
                 "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
-                "ref_audio" => TensorRef::from_array_view(&ref_data.ref_audio_32k)?,
+                "ref_audio" => TensorRef::from_array_view(audio)?,
             ])?,
         };
         debug!("SoVITS all time: {:?}", time.elapsed()?);

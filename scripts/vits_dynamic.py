@@ -5,6 +5,7 @@ are eligible. Attention masks and input-dependent valid-length masks stay intact
 """
 import argparse
 from pathlib import Path
+import tempfile
 import onnx
 from onnx import numpy_helper
 
@@ -83,11 +84,97 @@ def validate_vits_masks(model):
     return [node.name for node, _, _ in masks]
 
 
+def validate_split_reference(reference, decoder):
+    for model, inputs, outputs in (
+        (reference, {"ref_audio", "sv_emb"}, {"ge"}),
+        (decoder, {"text_seq", "pred_semantic", "ge"}, {"audio"}),
+    ):
+        if {value.name for value in model.graph.input} != inputs or {
+            value.name for value in model.graph.output
+        } != outputs:
+            raise ValueError("unexpected split VITS graph interface")
+        onnx.checker.check_model(model)
+    if reference.graph.output[0].type != next(
+        value.type for value in decoder.graph.input if value.name == "ge"
+    ):
+        raise ValueError("split VITS graphs disagree on the ge tensor type")
+
+
+def _reference_graphs(model):
+    boundary = [
+        node for node in model.graph.node
+        if node.op_type == "PRelu" and node.name == "/vq_model/prelu/PRelu"
+    ]
+    if len(boundary) != 1:
+        raise ValueError("expected one exported Pro reference PReLU")
+    ge_name = boundary[0].output[0]
+    slope_name = boundary[0].input[1]
+    slope = next((weight for weight in model.graph.initializer if weight.name == slope_name), None)
+    if slope is None or len(slope.dims) != 2 or slope.dims[1] != 1:
+        raise ValueError("expected one PReLU slope per reference feature channel")
+    # Shape inference can leave the rank unknown after a dynamic STFT.
+    # The Pro graph pools a single utterance to one feature frame.
+    ge = onnx.helper.make_tensor_value_info("ge", onnx.TensorProto.FLOAT, [1, slope.dims[0], 1])
+    for value in model.graph.value_info:
+        if value.name == ge_name:
+            value.CopyFrom(ge)
+            break
+    else:
+        model.graph.value_info.append(ge)
+    for node in model.graph.node:
+        for names in (node.input, node.output):
+            for index, name in enumerate(names):
+                if name == ge_name:
+                    names[index] = "ge"
+
+    extractor = onnx.utils.Extractor(model)
+    return (
+        extractor.extract_model(["ref_audio", "sv_emb"], ["ge"]),
+        extractor.extract_model(["text_seq", "pred_semantic", "ge"], ["audio"]),
+    )
+
+
+def split_reference(source, directory):
+    import onnxruntime as ort
+
+    original = onnx.load(source)
+    if {value.name for value in original.graph.input} != {
+        "text_seq", "pred_semantic", "ref_audio", "sv_emb"
+    }:
+        raise ValueError("expected a complete VITS v2Pro or v2ProPlus graph")
+    validate_vits_masks(original)
+
+    with tempfile.TemporaryDirectory(dir=directory.parent) as temporary:
+        scratch = Path(temporary)
+        optimized = scratch / "vits-optimized.onnx"
+        options = ort.SessionOptions()
+        # Preserve the original CPU fusions before introducing the split.
+        # Optimizing the two halves separately can change INT8 rounding.
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+        options.optimized_model_filepath = str(optimized)
+        ort.InferenceSession(str(source), options, providers=["CPUExecutionProvider"])
+        reference, decoder = _reference_graphs(onnx.load(optimized))
+        validate_split_reference(reference, decoder)
+        staged = scratch / "models"
+        staged.mkdir()
+        onnx.save(reference, staged / "vits_ref.onnx")
+        onnx.save(decoder, staged / "vits.onnx")
+        staged.rename(directory)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path)
-    parser.add_argument("--output", type=Path, help="Repair into a separate output file; otherwise validate only")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--output", type=Path, help="Repair into a separate output file")
+    mode.add_argument("--split-reference-dir", type=Path, help="Write a split Pro vocoder to a new directory")
     args = parser.parse_args()
+    if args.split_reference_dir:
+        if args.split_reference_dir.exists() or args.split_reference_dir.is_symlink():
+            parser.error("split output directory must be new")
+        split_reference(args.model, args.split_reference_dir)
+        print("Wrote split VITS graphs:", args.split_reference_dir)
+        parser.exit()
     model = onnx.load(args.model)
     if args.output:
         if args.output.resolve() == args.model.resolve():
@@ -95,5 +182,8 @@ if __name__ == "__main__":
         print("Repaired:", repair_vits_masks(model))
         onnx.checker.check_model(model)
         onnx.save(model, args.output)
+    elif any(value.name == "ge" for value in model.graph.input):
+        validate_split_reference(onnx.load(args.model.with_name("vits_ref.onnx")), model)
+        print("Verified split VITS reference and decoder")
     else:
         print("Verified dynamic masks:", validate_vits_masks(model))

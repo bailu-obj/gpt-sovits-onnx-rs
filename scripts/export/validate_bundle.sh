@@ -17,7 +17,7 @@ Checks required ONNX artifacts and Pro-family metadata in an export bundle.
 
 Options:
   --bundle-dir PATH   Required: onnx-patched export directory
-  --expect-v2pro      Require sv.onnx and sv_emb in VITS graph
+  --expect-v2pro      Require sv.onnx and a VITS speaker-embedding input
   -h, --help          Show this help
 EOF
 }
@@ -63,7 +63,9 @@ require_file "g2p_en/decoder_model.onnx"
 resolve_env_manager
 run_python "${ONNX_RS_ROOT}/scripts/vits_dynamic.py" "${BUNDLE_DIR}/vits.onnx"
 
-if $EXPECT_V2PRO; then
+if [[ -f "${BUNDLE_DIR}/vits_ref.onnx" ]]; then
+    require_file "sv.onnx"
+elif $EXPECT_V2PRO; then
     require_file "sv.onnx"
     grep -aq "sv_emb" "${BUNDLE_DIR}/vits.onnx" || \
         die "Expected sv_emb input in vits.onnx"

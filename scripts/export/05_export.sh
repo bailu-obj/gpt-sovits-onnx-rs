@@ -12,6 +12,7 @@ OUTPUT_DIR=""
 SMOKE_TEST=false
 VITS_ONLY=false
 SHARED_KV=false
+PREOPTIMIZE_CPU=false
 MODEL_PATH=""
 PROFILE="quality"
 VITS_CALIBRATION_DIR=""
@@ -31,6 +32,7 @@ Options:
   --gpt-sovits-dir PATH   Upstream clone path
   --vits-only             Refresh VITS only; existing speech/text exports required
   --shared-kv             Export the T2S step decoder with reusable CPU KV buffers
+  --preoptimize-cpu       Pre-fuse selected CPU graphs in the exported bundle
   --model-path PATH       Checkpoint directory (default: staged official models)
   --profile PROFILE       quality (default), compact, rtf, or mobile
   --vits-calibration-dir PATH  Mobile VITS INT8 calibration inputs (.npz)
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
     --vits-only) VITS_ONLY=true; shift ;;
     --shared-kv) SHARED_KV=true; shift ;;
+    --preoptimize-cpu) PREOPTIMIZE_CPU=true; shift ;;
     --model-path) MODEL_PATH="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --vits-calibration-dir) VITS_CALIBRATION_DIR="$2"; shift 2 ;;
@@ -160,6 +163,11 @@ run_python "${ONNX_RS_ROOT}/scripts/optimize_aio.py" "${OPT_ARGS[@]}"
 
 mkdir -p "${PATCHED_DIR}/g2p_en"
 cp "${G2P_EN_SRC}/encoder_model.onnx" "${G2P_EN_SRC}/decoder_model.onnx" "${PATCHED_DIR}/g2p_en/"
+
+if $PREOPTIMIZE_CPU; then
+    log_info "Pre-fusing selected CPU graphs"
+    run_python "${ONNX_RS_ROOT}/scripts/preoptimize_cpu.py" "${PATCHED_DIR}"
+fi
 
 if [[ -n "${REF_AUDIO}" ]]; then
     cp "${REF_AUDIO}" "${RAW_DIR}/ref.wav"

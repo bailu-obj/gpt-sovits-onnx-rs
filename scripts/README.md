@@ -117,7 +117,6 @@ PyTorch 导出使用固定宽度的 Q/K/V 分割、广播的首步注意力掩�
 VITS 相对注意力和低采样率打包上采样卷积。VITS 的注意力投影在导出前合并，
 BERT 只执行音色模型使用的前 22 层。这些改动也用于 `--no-quant`。
 
-`--profile compact` 使用 BERT/G2PW INT4 和语义 decoder 动态 INT8。
 `--profile quality` 仅将 BERT/G2PW 的常量 MatMul 权重转为 INT8，
 块大小为 32，`accuracy_level=1` 保留 FP32 激活。
 
@@ -128,6 +127,18 @@ python scripts/optimize_aio.py --input-dir onnx/v2 \
   --output-dir onnx-patched/v2-quality --profile quality
 ```
 
+### 低比特量化
+
+`--quant --profile compact` 面向模型包体积。BERT 和 G2PW 使用分块 INT4
+（块大小 64，`accuracy_level=2`），T2S 解码器使用动态 INT8。
+`--profile rtf` 和 `--profile mobile` 的逐 token 路径则把大型 T2S 投影量化为
+INT4（块大小 32，`accuracy_level=4`），词表输出层保留 FP32。
+
+单图试验采用块大小 32 和 `accuracy_level=4`。该配置的 BERT/G2PW INT4 文件比动态 INT8
+更小，在 M4 Pro 上推理耗时更长。`compact` 使用上面的分块参数。
+更低位宽（如 INT2、INT3）列为实验候选。评估时分别记录图体积、目标设备的首句与连续合成耗时、
+固定种子下的语义 token 和 PCM，并用试听、字错率和音色相似度核对输出差异。
+
 ## Android 低延迟导出
 
 完成上面的 macOS 准备步骤后，用单独的导出名称生成 Android 模型包：
@@ -135,7 +146,8 @@ python scripts/optimize_aio.py --input-dir onnx/v2 \
 ```bash
 VITS_CALIBRATION_DIR=/path/to/vits-calibration
 ./scripts/export/05_export.sh --version v2Pro --export-name v2pro-mobile \
-  --quant --profile mobile --shared-kv --vits-calibration-dir "${VITS_CALIBRATION_DIR}"
+  --quant --profile mobile --shared-kv --preoptimize-cpu \
+  --vits-calibration-dir "${VITS_CALIBRATION_DIR}"
 ./scripts/export/validate_bundle.sh \
   --bundle-dir gpt-sovits-upstream/onnx-patched/v2pro-mobile --expect-v2pro
 ```
