@@ -1,25 +1,52 @@
 # GPT-SoVITS ONNX RS
 
-GPT-SoVITS ONNX RS 是面向 x86-64 和 arm64 CPU 的本地语音合成引擎。项目源于 Bailu 的
-桌面和 Android 语音对话需求，用 Rust 和 ONNX Runtime 加载 GPT-SoVITS 模型，根据一段
-参考音和对应转录合成同音色语音。推理引擎可作为 Rust 库嵌入应用。仓库也提供模型导出与校验
-脚本，以及生成 WAV 的命令行示例。
+[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) 是一个少样本语音克隆项目。推理时，
+GPT 根据待合成文本和参考音生成语义 token，SoVITS 再根据 token 与参考音条件生成波形。
+提供一段清晰的参考录音和准确转录，即可用相应音色合成新文本。
+
+GPT-SoVITS ONNX RS 将官方预训练权重导出为 ONNX，提供面向 x86-64 和 arm64 CPU 的
+Rust 推理库。项目源于 Bailu 的桌面和 Android 语音对话需求，目标是在设备本地完成合成，
+让应用拿到首块 PCM 就能开播，同时支持按需切换参考音。它可用于语音助手、聊天朗读和离线
+旁白，也提供模型导出、校验脚本和生成 WAV 的 CLI。
 
 **Android CPU 实时性优化已在 Galaxy S25 Ultra 上验证。** macOS 和 Android 对话推荐
 **v2Pro + CPU Adaptive 句内流式**。需要生成完整音频时，可以使用同权重导出的普通 VITS 包。
 
 ## 快速开始
 
-### 1. 在 macOS 导出模型
+### 下载预导出模型（推荐）
 
-在仓库根目录执行。准备 Git、Rust、CMake、FFmpeg，以及 conda 或 uv。首次导出先准备上游代码和权重。
+[Hugging Face 模型仓](https://huggingface.co/mikv39/gpt-sovits-onnx-custom) 提供在 macOS
+导出的 v2Pro `quality` CPU 模型。根目录的 `vits.onnx` 是推荐的 Adaptive 流式图。
+用 `uv` 下载后，直接跳到 [macOS 构建与使用](#3-macos-构建与使用)。已有 Hugging Face CLI
+时也可以直接运行 `hf download`。
 
 ```bash
+STREAM_DIR=models/v2pro-quality-stream
+uvx --from huggingface_hub hf download mikv39/gpt-sovits-onnx-custom \
+  --local-dir "$STREAM_DIR" --exclude vits_non_streaming.onnx
+```
+
+整段合成使用同仓库的 `vits_non_streaming.onnx`。它与流式图共用其余模型文件，运行前在普通
+模型目录中将其保存为 `vits.onnx`。[非流式下载与运行示例](https://huggingface.co/mikv39/gpt-sovits-onnx-custom#download-and-run)
+
+自定义权重、量化或 Android `mobile` 模型包可按下面的步骤导出。
+
+### 1. 在 macOS 导出模型
+
+在仓库根目录执行。准备 Git、Rust、CMake 和 FFmpeg。首次导出推荐用 `uv` 准备 Python
+环境。后续导出命令在同一终端执行。
+
+```bash
+export ENV_MANAGER=uv
 ./scripts/export/01_clone.sh --upstream-ref 04a44eb977586645f33594b72af13a035a2056c6
 ./scripts/export/02_patch.sh
 ./scripts/export/03_setup_env.sh --source HF
 ./scripts/export/04_download_models.sh --version v2Pro
 ```
+
+已有 `gpt-sovits-upstream/.venv` 且装齐上游依赖和 [ONNX 工具](scripts/requirements.txt) 时，
+可以跳过步骤 03，复用本地已安装的包。
 
 根据运行平台选择一组命令。两个模型包都在 macOS 导出。
 
@@ -42,22 +69,23 @@ MODEL_DIR=gpt-sovits-upstream/onnx-patched/v2pro-android
 ### 2. 生成流式模型包
 
 `05_export.sh` 产出可直接用于整段推理的普通 VITS。推荐的流式流程继续拆分参考音图，再生成
-带 `stream_start_frame` 的流式 VITS。先在当前终端激活导出环境。
+带 `stream_start_frame` 的流式 VITS。可以用 `uv` 准备的 Python，也可以把 `PYTHON` 指向
+本地已安装 `onnx` 和 `onnxruntime` 的 Python。
 
 ```bash
-conda activate GPTSoVits
-# 如果通过 uv 准备环境，改用 source gpt-sovits-upstream/.venv/bin/activate
+PYTHON=gpt-sovits-upstream/.venv/bin/python
 
 CACHED_DIR="${MODEL_DIR}-cached"
 STREAM_DIR="${MODEL_DIR}-stream"
-python scripts/vits_dynamic.py "$MODEL_DIR/vits.onnx" --split-reference-dir "$CACHED_DIR"
+"$PYTHON" scripts/vits_dynamic.py "$MODEL_DIR/vits.onnx" --split-reference-dir "$CACHED_DIR"
 rsync -a --exclude='/vits.onnx' --exclude='/vits_ref.onnx' \
   --exclude='/ref.wav' --exclude='/ref.txt' --exclude='/reference.wav' --exclude='/reference.txt' \
   "$MODEL_DIR/" "$CACHED_DIR/"
 mkdir -p "$STREAM_DIR"
 rsync -a --exclude='/vits.onnx' "$CACHED_DIR/" "$STREAM_DIR/"
-python scripts/vits_streaming.py "$CACHED_DIR/vits.onnx" "$STREAM_DIR/vits.onnx"
-./scripts/export/validate_bundle.sh --bundle-dir "$STREAM_DIR" --expect-v2pro --expect-streaming
+"$PYTHON" scripts/vits_streaming.py "$CACHED_DIR/vits.onnx" "$STREAM_DIR/vits.onnx"
+./scripts/export/validate_bundle.sh --python "$PYTHON" \
+  --bundle-dir "$STREAM_DIR" --expect-v2pro --expect-streaming
 ```
 
 ### 3. macOS 构建与使用
@@ -109,20 +137,26 @@ adb pull "$DEVICE_DIR/stream.wav" target/android/stream.wav
 | 音色 | WAV 和准确转录作为参考输入。Pro 系列使用 `sv.onnx` 提取说话人特征，可拆分参考图并缓存 `ge` |
 | 部署 | Rust 库、命令行示例和 Android JNI 示例。下文的性能数据来自 macOS Apple Silicon 和 Android arm64 |
 
-推荐的 v2Pro 模型包使用官方 `s1v3.ckpt` 和 `v2Pro/s2Gv2Pro.pth`。`quality` 保留
-T2S 和 VITS 的浮点计算，将 BERT 和 G2PW 的 MatMul 权重转为 INT8。`mobile` 对
-逐 token 解码采用 INT4 投影，可按需要校准部分 VITS 卷积。建议使用 3–10 秒的清晰参考音。
-[模型导出与量化配置](scripts/README.md)
+推荐的 v2Pro 模型包使用官方 `s1v3.ckpt` 和 `v2Pro/s2Gv2Pro.pth`。参考音建议选用
+3–10 秒的清晰录音。
 
 ## 推理流程
 
 1. **文本前端**先断句和规范化文本，再结合 BERT、G2PW 和英文 G2P 生成发音和文本特征。
-2. **T2S** 根据文本特征和参考语义生成语义 token。支持共享 KV 布局的模型会在逐 token 解码期间复用缓存。
-3. **VITS** 根据语义 token 和参考音条件生成 PCM。整段模式汇总完整音频。流式模式在 T2S
-   继续解码时开始生成可播放的 PCM，Adaptive 根据播放余量和近期合成耗时调整后续块长。
+2. **T2S** 根据文本特征和参考语义逐步生成语义 token。
+3. **VITS** 根据语义 token 和参考音条件生成 PCM。流式模式在 T2S 继续解码时就开始输出音频。
+
+### CPU 推理优化
+
+- **共享 KV 缓冲区**减少 T2S 逐 token 解码时的缓存分配与拷贝。
+- **参考音特征缓存**通过 `vits_ref.onnx` 在设置或切换参考音时计算 `ge`，后续合成直接复用。
+- **选择性预融合与量化**在导出时完成适合 CPU 的 ONNX Runtime 图融合，减少加载时的优化开销。
+  `quality` 对 BERT 和 G2PW 的 MatMul 权重做 INT8 量化，保留浮点语音生成。`mobile` 对逐 token
+  解码使用 INT4 投影，可按需要校准部分 VITS 卷积。[模型导出与量化配置](scripts/README.md)
+- **Adaptive 句内流式**让 VITS 从指定帧开始生成当前块及拼接所需上下文，运行时按播放余量和
+  合成速度调整块长。应用可在收到首块 PCM 后开始播放。
 
 在同一模型实例上重新调用 `process_reference_sync`，即可用新的 WAV 路径和转录切换音色。
-使用 `vits_ref.onnx` 的模型包也会在这一步缓存 `ge`，后续合成复用。
 
 ## 性能
 
@@ -142,11 +176,11 @@ RTF 为合成耗时除以音频时长。
 
 | 用途 | 模型包 | CLI | Rust |
 | --- | --- | --- | --- |
-| 流式，边合成边播放 | 步骤 2 的 `$STREAM_DIR`，VITS 含 `stream_start_frame` | `--stream` | `synthesize_token_chunks_sync` 回调逐块交付 PCM |
-| 非流式，生成完整音频 | 步骤 1 的 `$MODEL_DIR`，普通 VITS | 默认模式 | `synthesize_sync` 返回 `(WavSpec, Vec<f32>)` |
+| 流式，边合成边播放 | 下载或步骤 2 生成的 `$STREAM_DIR`，VITS 含 `stream_start_frame` | `--stream` | `synthesize_token_chunks_sync` 回调逐块交付 PCM |
+| 非流式，生成完整音频 | 下载普通图或使用步骤 1 的 `$MODEL_DIR` | 默认模式 | `synthesize_sync` 返回 `(WavSpec, Vec<f32>)` |
 
-整段推理直接使用步骤 1 的模型包。把上面命令的 `--model-path` 指向普通包，并省略
-`--stream`。已有模型包可用 `--expect-ordinary` 或 `--expect-streaming` 校验。
+整段推理将上面命令的 `--model-path` 指向使用普通 VITS 的模型目录，并省略 `--stream`。
+已有模型包可用 `--expect-ordinary` 或 `--expect-streaming` 校验。
 
 Rust 调用方用 `TTSModel::from_bundle` 加载模型，再按上表选择接口。流式接口缺少对应的
 VITS 图时返回错误。[Rust 命令行示例](examples/gpt_sovits_demo.rs) · [Android JNI 示例](examples/gpt_sovits_demo_jni.rs)

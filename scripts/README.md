@@ -21,8 +21,8 @@ macOS 和 Android 的对话场景都推荐 v2Pro CPU Adaptive。先在 macOS 导
 | 流式包 | 参考音拆分后运行 `vits_streaming.py` | 在普通图基础上增加 `stream_start_frame` | CLI `--stream` 或 Rust `synthesize_token_chunks_sync`，按 Adaptive 逐块返回 PCM |
 
 校验脚本用 `--expect-ordinary` 或 `--expect-streaming` 检查图类型，`--expect-v2pro` 检查
-Pro 系列模型接口和说话人模型。已有模型包可用 `--python /path/to/python` 指定装有
-`onnx` 和 `onnxruntime` 的独立环境。缺少流式图时，流式接口返回错误。
+Pro 系列模型接口和说话人模型。已有模型包可以用本地已安装的 `onnx` 和 `onnxruntime` 校验，
+通过 `--python /path/to/python` 指定对应解释器。缺少流式图时，流式接口返回错误。
 
 ```bash
 ./scripts/export/validate_bundle.sh --bundle-dir "$MODEL_DIR" --expect-v2pro --expect-ordinary
@@ -84,7 +84,9 @@ v2Pro 和 v2ProPlus 可以用 `vits_dynamic.py --split-reference-dir` 将 VITS �
 ## 其他模型与自定义导出
 
 分阶段脚本在 macOS 上运行。步骤 02 将子仓库的 `patch/GPT_SoVITS/` 覆盖到上游，以导出 Rust 所需的外部 KV。
-步骤 03 会为 conda 或 uv 环境安装 [ONNX 工具](requirements.txt)。后续 Python 图处理命令使用同一个环境。
+推荐用 `uv` 准备导出环境。步骤 03 在 `gpt-sovits-upstream/.venv` 中安装上游 Python 依赖和
+[ONNX 工具](requirements.txt)。已有该环境且依赖齐全时，可以跳过步骤 03。已有普通 ONNX
+模型包时，拆图和校验也可以直接使用装有 `onnx` 和 `onnxruntime` 的本地 Python。
 步骤 04 支持 `v2`、`v2Pro`、`v2ProPlus`。官方 v2Pro 权重为 `s1v3.ckpt` 和
 `v2Pro/s2Gv2Pro.pth`。自定义检查点可通过 `05_export.sh --model-path PATH` 指定目录。
 
