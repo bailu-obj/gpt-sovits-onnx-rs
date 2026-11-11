@@ -266,7 +266,7 @@ class T2SModel(nn.Module):
         
 
 class VitsModel(nn.Module):
-    def __init__(self, vits_path, version="v2"):
+    def __init__(self, vits_path, version="v2", *, pack_upsamples=True):
         super().__init__()
         dict_s2 = torch.load(vits_path, map_location="cpu", weights_only=False)
         self.hps = dict_s2["config"]
@@ -286,7 +286,8 @@ class VitsModel(nn.Module):
         self.vq_model.eval()
         self.vq_model.load_state_dict(dict_s2["weight"], strict=False)
         self.vq_model.dec.remove_weight_norm()
-        self.vq_model.dec.pack_upsamples_for_export()
+        if pack_upsamples:
+            self.vq_model.dec.pack_upsamples_for_export()
         for layer in self.vq_model.enc_p.modules():
             if isinstance(layer, MultiHeadAttention):
                 layer.pack_projections_for_export()
@@ -440,8 +441,8 @@ def export_bert(project_name):
     print("#### exported bert ####")
 
 
-def export(vits_path, gpt_path, project_name, vits_model="v2", shared_kv=False):
-    vits = VitsModel(vits_path, version=vits_model)
+def export(vits_path, gpt_path, project_name, vits_model="v2", shared_kv=False, *, pack_upsamples=True):
+    vits = VitsModel(vits_path, version=vits_model, pack_upsamples=pack_upsamples)
     gpt = T2SModel(gpt_path, vits)
     sv_model = None
     if is_v2pro(vits_model):
@@ -507,9 +508,9 @@ def export(vits_path, gpt_path, project_name, vits_model="v2", shared_kv=False):
 
 
 
-def export_vits_only(vits_path, project_name, version):
+def export_vits_only(vits_path, project_name, version, *, pack_upsamples=True):
     """Refresh the vocoder from its checkpoint without touching T2S/text models."""
-    model = VitsModel(vits_path, version=version)
+    model = VitsModel(vits_path, version=version, pack_upsamples=pack_upsamples)
     model.eval()
     text = torch.zeros((1, 24), dtype=torch.long)
     semantic = torch.zeros((1, 1, 160), dtype=torch.long)
@@ -539,6 +540,7 @@ if __name__ == "__main__":
     parser.add_argument("--sovits-checkpoint", help="Override model_path/sovits.pth")
     parser.add_argument("--vits-only", action="store_true", help="Refresh only VITS from checkpoint")
     parser.add_argument("--shared-kv", action="store_true", help="Export the T2S step decoder with reusable CPU KV buffers")
+    parser.add_argument("--vits-conv-transpose", action="store_true", help="Keep transposed convolutions in the VITS upsampler")
     args = parser.parse_args()
     if args.vits_only and args.shared_kv:
         parser.error("--shared-kv requires a full export")
@@ -552,8 +554,9 @@ if __name__ == "__main__":
     version = resolve_version(vits_path, args.version, args.auto_version)
     with torch.no_grad():
         if args.vits_only:
-            export_vits_only(vits_path, args.export_name, version)
+            export_vits_only(vits_path, args.export_name, version, pack_upsamples=not args.vits_conv_transpose)
         else:
-            export(vits_path, gpt_path, args.export_name, version, args.shared_kv)
+            export(vits_path, gpt_path, args.export_name, version, args.shared_kv,
+                   pack_upsamples=not args.vits_conv_transpose)
 
     # soundfile.write("out.wav", a, vits.hps.data.sampling_rate)

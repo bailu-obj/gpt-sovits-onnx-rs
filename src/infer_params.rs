@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::GSVError;
 use crate::logits_sampler::{SamplingParams, SamplingParamsBuilder};
 
-/// Built-in sampling defaults for inference.
+/// Inference settings with built-in defaults.
 #[derive(Clone, Debug, Deserialize)]
 pub struct InferParams {
     #[serde(default = "default_top_k")]

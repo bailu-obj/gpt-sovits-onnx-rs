@@ -7,7 +7,6 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 UPSTREAM_REF="main"
 FORCE=false
-REMAINING=()
 
 usage() {
     cat <<'EOF'
@@ -42,8 +41,7 @@ while [[ $# -gt 0 ]]; do
         exit 0
         ;;
     *)
-        REMAINING+=("$1")
-        shift
+        die "Unknown argument: $1"
         ;;
     esac
 done
@@ -57,16 +55,14 @@ if $FORCE && [[ -d "${GPT_SOVITS_ROOT}" ]]; then
     rm -rf "${GPT_SOVITS_ROOT}"
 fi
 
-if [[ -d "${GPT_SOVITS_ROOT}/.git" ]]; then
-    log_info "Updating existing clone at ${GPT_SOVITS_ROOT}"
-    git -C "${GPT_SOVITS_ROOT}" fetch origin "${UPSTREAM_REF}" --depth 1
-    git -C "${GPT_SOVITS_ROOT}" checkout FETCH_HEAD
-    log_ok "Clone updated (ref: ${UPSTREAM_REF})"
-else
-    log_info "Cloning GPT-SoVITS into ${GPT_SOVITS_ROOT}"
-    mkdir -p "$(dirname "${GPT_SOVITS_ROOT}")"
-    git clone --depth 1 --branch "${UPSTREAM_REF}" \
-        https://github.com/RVC-Boss/GPT-SoVITS.git "${GPT_SOVITS_ROOT}" || \
-        git clone --depth 1 https://github.com/RVC-Boss/GPT-SoVITS.git "${GPT_SOVITS_ROOT}"
-    log_ok "Clone complete"
+if [[ ! -e "${GPT_SOVITS_ROOT}/.git" ]]; then
+    mkdir -p "${GPT_SOVITS_ROOT}"
+    [[ -z "$(ls -A "${GPT_SOVITS_ROOT}")" ]] || die "Clone destination must be empty"
+    git init -q "${GPT_SOVITS_ROOT}"
+    git -C "${GPT_SOVITS_ROOT}" remote add origin https://github.com/RVC-Boss/GPT-SoVITS.git
 fi
+
+log_info "Fetching GPT-SoVITS ref ${UPSTREAM_REF} into ${GPT_SOVITS_ROOT}"
+git -C "${GPT_SOVITS_ROOT}" fetch --depth=1 -- origin "${UPSTREAM_REF}"
+git -C "${GPT_SOVITS_ROOT}" checkout --detach FETCH_HEAD
+log_ok "Upstream commit: $(git -C "${GPT_SOVITS_ROOT}" rev-parse HEAD)"

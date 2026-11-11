@@ -1,116 +1,48 @@
-# PyTorch vs Rust ONNX Speed Comparison
+# PyTorch 与 Rust ONNX 的整段推理耗时
 
-Validated on **2026-07-09** (macOS, CPU only).
+2026 年 7 月 9 日在 macOS CPU 上对照 v2Pro 和 v2ProPlus。两端使用同一文本、同一参考音
+和默认采样配置，模型及参考音就绪后计时。表中为 10 轮结果，Python 的两轮预热单独排除。
 
-## Summary
+| 模型 | PyTorch `tts.run()` | Rust `synthesize_sync` | 加速倍数 |
+| --- | ---: | ---: | ---: |
+| v2Pro | 910 ms | 400 ms | 约 2.3 倍 |
+| v2ProPlus | 992 ms | 548 ms | 约 1.8 倍 |
 
-On the same fixed inputs (built-in sampling defaults, text via CLI), **Rust ONNX inference is faster than upstream PyTorch** for both v2Pro and v2ProPlus when reference audio is cached (typical chat / multi-utterance use).
+PyTorch 单次模型加载约 760 ms（v2Pro）和 823 ms（v2ProPlus）。上表计时从模型加载、
+参考音处理完成后开始。Python 每次仍执行 BERT 和 G2P，Rust 在 `process_reference_sync`
+完成后开始测量 `synthesize_sync`。
 
-| Version | PyTorch `tts.run()` | Rust `synthesize_sync` | Speedup |
-|---------|---------------------|-------------------------|---------|
-| **v2Pro** | **910 ms** (median 910) | **400 ms** (median 400) | **~2.3×** |
-| **v2ProPlus** | **992 ms** (median 992) | **548 ms** (median 547) | **~1.8×** |
+## 单轮阶段耗时
 
-PyTorch one-time model load: ~760 ms (v2Pro), ~823 ms (v2ProPlus).
+| 模型与阶段 | PyTorch | Rust ONNX |
+| --- | ---: | ---: |
+| v2Pro 文本到语义 | 586 ms | 238 ms |
+| v2Pro VITS | 157 ms | 149 ms |
+| v2Pro 合成总耗时 | 910 ms | 410 ms |
+| v2ProPlus 文本预处理 | 61 ms | 20 ms |
+| v2ProPlus 文本到语义 | 586–592 ms | 241 ms |
+| v2ProPlus VITS | 234–239 ms | 289 ms |
+| v2ProPlus 合成总耗时 | 910–992 ms | 548 ms |
 
-Rust pays a larger one-time cost on first `cargo run` (ONNX session creation + `process_reference` including SSL/SV). That cost is **not** included in the synthesis numbers above.
+Rust v2ProPlus 文本到语义阶段约由编码器 2.5 ms、首步 46 ms 和逐 token 解码 193 ms 组成。
 
----
+## 复现
 
-## Test setup
-
-| Item | Value |
-|------|--------|
-| Text | `<待合成文本>` |
-| Ref text | `<参考音频的准确转录>` |
-| Sampling | `top_k=4`, `top_p=0.9`, `temperature=1.0`, `repetition_penalty=1.35`; `seed=42` only in compare scripts |
-| PyTorch device | CPU (`is_half=False`) |
-| Rust | Release build, ONNX Runtime CPU EP |
-| Timed runs | 10 (Python: 2 warmup discarded) |
-| Reference | Cached after first run (HuBERT / ref spec not re-encoded) |
-
-Bundles:
-
-- v2Pro → `gpt-sovits-upstream/onnx-patched/custom/`
-- v2ProPlus → `gpt-sovits-upstream/onnx-patched/custom_v2proplus/`
-
-**Fairness note:** PyTorch `tts.run()` still re-runs text frontend (BERT/G2P) on every call even when `prompt_cache` holds reference audio. Rust times `synthesize_sync` only, after `process_reference_sync` — matching “reference fixed, synthesize many sentences” usage.
-
----
-
-## Per-stage breakdown (single run)
-
-### v2ProPlus
-
-| Stage | PyTorch (cached ref)* | Rust ONNX |
-|-------|----------------------|-----------|
-| Text preprocess | ~61 ms | ~20 ms |
-| T2S semantic | ~586–592 ms | ~241 ms (encoder 2.5 + fs 46 + s-decoder 193 ms) |
-| VITS decode | ~234–239 ms | ~289 ms |
-| **Synthesis total** | **~910–992 ms** | **~548 ms** |
-
-### v2Pro
-
-| Stage | PyTorch (cached ref)* | Rust ONNX |
-|-------|----------------------|-----------|
-| T2S semantic | ~586 ms | ~238 ms |
-| VITS decode | ~157 ms | ~149 ms |
-| **Synthesis total** | **~910 ms** | **~410 ms** |
-
-\*From upstream log after reference cache, e.g. `0.000 0.060 0.588 0.236` → ref skipped, BERT ≈ 60 ms, T2S ≈ 588 ms, VITS ≈ 236 ms.
-
----
-
-## Takeaways
-
-1. **End-to-end synthesis:** Rust ONNX wins on CPU for both Pro-family models (~1.8–2.3×).
-2. **Largest gain is T2S:** PyTorch ~590 ms vs Rust ~190–240 ms per short utterance.
-3. **VITS is mixed:** Rust is slightly faster on v2Pro; on v2ProPlus VITS alone can be a bit slower than PyTorch, but T2S savings dominate total latency.
-4. **Text frontend:** Rust preprocess (~20 ms) is faster than PyTorch BERT pass (~60 ms) on cached-ref runs.
-
-Audio **quality** parity is separate from speed; see `doc/v2proplus_validation.md` and `scripts/compare_onnx_versions.py`.
-
----
-
-## Reproduce
-
-### PyTorch
+在仓库根目录使用导出环境的 Python，给两端传入同一参考 WAV 和转录。
 
 ```bash
-cd gpt-sovits-upstream
-../.venv/bin/python ../scripts/run_python_baseline.py \
-  --versions v2Pro v2ProPlus
-```
+REF_WAV=/path/to/ref.wav
+REF_TEXT='<参考音频的准确转录>'
+TEXT='<待合成文本>'
+MODEL_DIR=/path/to/ordinary-model-bundle
 
-Upstream prints per-stage seconds on the last line of each run (ref, BERT, T2S, VITS).
+python scripts/run_python_baseline.py --versions v2Pro v2ProPlus \
+  --ref-audio "$REF_WAV" --ref-text "$REF_TEXT" --text "$TEXT"
 
-### Rust ONNX
-
-```bash
-# v2Pro — 10-run median/avg
 cargo run --release --example gpt_sovits_demo -- \
-  --model-path gpt-sovits-upstream/onnx-patched/custom \
-  --run-count 10 \
-  --output /tmp/output_v2pro.wav
-
-# v2ProPlus
-cargo run --release --example gpt_sovits_demo -- \
-  --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
-  --run-count 10 \
-  --output /tmp/output_v2proplus.wav
+  --model-path "$MODEL_DIR" --ref-audio "$REF_WAV" --ref-text "$REF_TEXT" --text "$TEXT" \
+  --run-count 10 --output output.wav
 ```
 
-Per-stage Rust timings (debug):
-
-```bash
-RUST_LOG=gpt_sovits_onnx_rs=debug cargo run --release --example gpt_sovits_demo -- \
-  --model-path gpt-sovits-upstream/onnx-patched/custom_v2proplus \
-  --run-count 1
-```
-
----
-
-## Related
-
-- Historical platform benchmarks (quantization, Android): [`doc/perf_record.md`](perf_record.md)
-- v2ProPlus validation: [`doc/v2proplus_validation.md`](v2proplus_validation.md)
+加入 `RUST_LOG=gpt_sovits_onnx_rs=debug` 可查看 Rust 分阶段耗时。
+[近期性能记录](perf_record.md) · [v2ProPlus 输出对照](v2proplus_validation.md)

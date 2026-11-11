@@ -11,6 +11,7 @@ NO_QUANT=true
 OUTPUT_DIR=""
 SMOKE_TEST=false
 VITS_ONLY=false
+VITS_CONV_TRANSPOSE=false
 SHARED_KV=false
 PREOPTIMIZE_CPU=false
 MODEL_PATH=""
@@ -31,18 +32,19 @@ Options:
   --export-name NAME      Required: output bundle name (e.g. v2pro)
   --gpt-sovits-dir PATH   Upstream clone path
   --vits-only             Refresh VITS only; existing speech/text exports required
+  --vits-conv-transpose   Keep transposed convolutions in the VITS upsampler
   --shared-kv             Export the T2S step decoder with reusable CPU KV buffers
   --preoptimize-cpu       Pre-fuse selected CPU graphs in the exported bundle
   --model-path PATH       Checkpoint directory (default: staged official models)
   --profile PROFILE       quality (default), compact, rtf, or mobile
   --vits-calibration-dir PATH  Mobile VITS INT8 calibration inputs (.npz)
-  --ref-audio PATH        Reference WAV to copy into the bundle
+  --ref-audio PATH        Reference WAV path for the smoke test
   --ref-text TEXT         Accurate reference transcription (required for smoke test)
   --text TEXT             Text to synthesize (required for smoke test)
   --output-dir PATH       Copy/symlink final bundle here (optional)
   --no-quant              Export floating-point models (default)
   --quant                 Apply the selected quantization profile
-  --smoke-test            Run cargo gpt_sovits_demo after export (needs ref.wav)
+  --smoke-test            Run cargo gpt_sovits_demo with the supplied reference WAV and text
   -h, --help              Show this help
 EOF
 }
@@ -50,6 +52,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --vits-only) VITS_ONLY=true; shift ;;
+    --vits-conv-transpose) VITS_CONV_TRANSPOSE=true; shift ;;
     --shared-kv) SHARED_KV=true; shift ;;
     --preoptimize-cpu) PREOPTIMIZE_CPU=true; shift ;;
     --model-path) MODEL_PATH="$2"; shift 2 ;;
@@ -98,6 +101,13 @@ done
 
 [[ -n "${VERSION}" ]] || die "--version is required"
 [[ -n "${EXPORT_NAME}" ]] || die "--export-name is required"
+if $SMOKE_TEST; then
+    [[ -f "${REF_AUDIO}" ]] || die "--ref-audio must name a WAV file for a smoke test"
+    [[ -n "${REF_TEXT}" ]] || die "--ref-text is required for a smoke test"
+    [[ -n "${TEXT}" ]] || die "--text is required for a smoke test"
+    REF_AUDIO="$(cd "$(dirname "${REF_AUDIO}")" && pwd)/$(basename "${REF_AUDIO}")"
+    require_cmd cargo
+fi
 
 require_macos
 init_paths
@@ -128,6 +138,7 @@ PATCHED_DIR="${GPT_SOVITS_ROOT}/onnx-patched/${EXPORT_NAME}"
 
 EXPORT_ARGS=(--version "${VERSION}")
 if $VITS_ONLY; then EXPORT_ARGS+=(--vits-only); fi
+if $VITS_CONV_TRANSPOSE; then EXPORT_ARGS+=(--vits-conv-transpose); fi
 if $SHARED_KV; then EXPORT_ARGS+=(--shared-kv); fi
 
 log_info "Exporting ONNX (${VERSION} -> ${EXPORT_NAME})"
@@ -169,29 +180,29 @@ if $PREOPTIMIZE_CPU; then
     run_python "${ONNX_RS_ROOT}/scripts/preoptimize_cpu.py" "${PATCHED_DIR}"
 fi
 
-if [[ -n "${REF_AUDIO}" ]]; then
-    cp "${REF_AUDIO}" "${RAW_DIR}/ref.wav"
-    cp "${REF_AUDIO}" "${PATCHED_DIR}/ref.wav"
+VALIDATION_ARGS=(--bundle-dir "${PATCHED_DIR}")
+if [[ "${VERSION}" == v2Pro || "${VERSION}" == v2ProPlus ]]; then
+    VALIDATION_ARGS+=(--expect-v2pro)
 fi
+run_python "${ONNX_RS_ROOT}/scripts/validate_bundle.py" "${VALIDATION_ARGS[@]}"
 
 if [[ -n "${OUTPUT_DIR}" ]]; then
     mkdir -p "${OUTPUT_DIR}"
-    rsync -a "${PATCHED_DIR}/" "${OUTPUT_DIR}/"
+    rsync -a --exclude='/ref.wav' --exclude='/ref.txt' \
+        --exclude='/reference.wav' --exclude='/reference.txt' "${PATCHED_DIR}/" "${OUTPUT_DIR}/"
     log_ok "Copied bundle to ${OUTPUT_DIR}"
 else
     log_ok "Export complete: ${PATCHED_DIR}"
 fi
 
 if $SMOKE_TEST; then
-    [[ -n "${REF_TEXT}" ]] || die "--ref-text is required for a smoke test"
-    [[ -n "${TEXT}" ]] || die "--text is required for a smoke test"
-    require_cmd cargo
-    local_model="${OUTPUT_DIR:-${PATCHED_DIR}}"
+    local_model="$(cd "${OUTPUT_DIR:-${PATCHED_DIR}}" && pwd)"
     log_info "Running Rust smoke test"
     (
         cd "${ONNX_RS_ROOT}"
         cargo run --release --example gpt_sovits_demo -- \
             --model-path "${local_model}" \
+            --ref-audio "${REF_AUDIO}" \
             --ref-text "${REF_TEXT}" \
             --text "${TEXT}"
     )

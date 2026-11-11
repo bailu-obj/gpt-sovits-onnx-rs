@@ -1,268 +1,173 @@
-# GPT-SOVITS-ONNX-RS
+# GPT-SoVITS ONNX RS
 
-一个基于 **Rust** 和 **ONNX Runtime** 的轻量级、跨平台 GPT-SoVITS TTS 推理引擎，专为在 **x86/ARM** 架构的 **CPU** 上运行而设计。
+GPT-SoVITS ONNX RS 是面向 x86-64 和 arm64 CPU 的本地语音合成引擎。项目源于 Bailu 的
+桌面和 Android 语音对话需求，用 Rust 和 ONNX Runtime 加载 GPT-SoVITS 模型，根据一段
+参考音和对应转录合成同音色语音。推理引擎可作为 Rust 库嵌入应用。仓库也提供模型导出与校验
+脚本，以及生成 WAV 的命令行示例。
 
-## v2Pro 导出配置
+**Android CPU 实时性优化已在 Galaxy S25 Ultra 上验证。** macOS 和 Android 对话推荐
+**v2Pro + CPU Adaptive 句内流式**。需要生成完整音频时，可以使用同权重导出的普通 VITS 包。
 
-推荐从官方 `s1v3.ckpt` 与 `v2Pro/s2Gv2Pro.pth` 导出 v2Pro，使用 quality
-量化策略：仅 BERT/G2PW MatMul 权重 INT8，激活、T2S、VITS、SSL 和 SV 保持
-FP32。完整模型包包含 `sv.onnx`，约 2.12 GiB，适用于 macOS 和 Android。
-参考音频应清晰、底噪低，并提供与实际音频逐字匹配的转录。
-请自行准备有权使用的参考音频，音色效果需在目标设备试听确认。
+## 快速开始
 
-Android 可选用 `--quant --profile mobile`，并搭配 `--shared-kv` 与 VITS
-校准输入导出 Galaxy S25 Ultra 验证过的低延迟配置。首次启用量化时，
-`05_export.sh --quant` 继续选用 `quality`。
-导出命令和各模型的精度见 [转换脚本说明](scripts/README.md#android-低延迟导出)。
+### 1. 在 macOS 导出模型
 
-## 项目简介
-
-本项目旨在将 GPT-SoVITS (V2) 模型通过 ONNX Runtime 部署到各类 CPU 设备上，以实现低延迟、高可用的本地文本转语音（TTS）能力。它最初是为个人全平台 Chatbot 项目（尚未开源）的 Android 和 PC 端提供 TTS 支持而开发的。
-
-将在保证可接受精度的前提下，对实时性进行持续优化。
-
-目前的实时性优化已经接近尾声，后续考虑中英文混合场景的优化。
-
-之前的账号由于一些原因被删除，导致原项目删除。
-
------
-
-## 核心特性
-
-* **跨平台推理核心**：使用 Rust 编写，确保了内存安全与高性能，可轻松编译到 x86 和 ARM 平台（Linux, Android 等）。
-* **一键式模型转换**：提供位于 `scripts` 目录的 Python 脚本，用于一键导出和优化 SoVITS 模型。**注意：** 优化后的模型结构与官方不兼容，转换时需使用本项目提供的完整脚本并按照文档操作。
-* **完整的 Android 构建支持**：提供了 `build_for_android.sh` 脚本，自动化处理 ONNX Runtime 的源码下载、编译及项目构建，解决了官方 `ort-rs` 缺少 Android 预构建包的问题。
-
-
-* 详细性能数据请参考 [**性能记录 (perf\_record)**](doc/perf_record.md) 与 [**PyTorch vs ONNX 速度对比**](doc/pytorch_vs_onnx_speed.md)（2026-07-09，v2Pro / v2ProPlus CPU）。
-* 通过在运行时设置lang_id为LangId::AutoYue，可以启用粤语模式。
-
------
-
-## 项目状态与已知问题
-
-2026-07-09: 对齐 Python 参考文本 phoneme 路径（`get_phone_and_bert_whole`）、HuBERT SSL 尾静音 padding（`32000×0.3`）、T2S 采样（`temperature=0` 时仍应用 rep-penalty/top-k/top-p）。内置采样默认值（`InferParams::default()`）；`scripts/compare_onnx_versions.py`（v2Pro / v2ProPlus）。波形与 PyTorch 在相同 `seed` 下仍可能因 RNG / VITS 随机 decode 略有差异，见 `scripts/reports/` 对比报告。
-
-2026-07-08: 重构推理预处理管线，对齐 Python TextPreprocessor/chinese2：tone sandhi、erhua、分段切句、短句补齐、英文 num2en、parity 测试，增强多语言输出效果。更新导出代码,方便自行导出模型。
-
-2026-03-21: 优化了中英文混合效果（借助Cursor自动化编写）
-
-2026-01-25: 测试了ort_rc11,但是在mac（arm）上性能更差（-10%），目前将deps固定在了ort_rc10。参见[update/ort_rc_11](https://github.com/bailu-obj/gpt-sovits-onnx-rs/tree/update/ort_rc_11)分支  
-
-2025-11-06: 初步支持V2Pro模型，详情请见转换脚本。目前V2Pro的精度和速度仍未优化，且android平台仍未验证。
-
-2025-07-12: 将部分onnx模型代码同步到和pytorch一致，简化了一部分模型逻辑，并修复了library中由于缺少空白声音导致的吸气问题，如果提示找不到输出，请更新hf上的新模型，或者重新转换自己的模型。
-
-2025-06-30: 提取sampler到rust层，并更新了模型转换脚本和demo模型，如果提示找不到输出，请更新模型。
-
-
------
-
-## 方案对比
-
-为了帮助您选择最适合的方案，我将其与社区主流项目进行了对比。
-
-| 方案 | TTS 效果 | 性能 | 平台兼容性 | 易用性 |
-| :--- | :--- | :--- | :--- | :--- |
-| **sherpa-onnx** | ★★☆☆☆ (情感稍弱) | ★★★★★ (模型小，实时性强) | ★★★★★ (全平台) | ★★★★★ (官方预构建) |
-| **[GPT-SoVITS-RS](https://github.com/second-state/gpt_sovits_rs)** | ★★☆★☆ (接近原版) | ★★★★☆ (依赖 Torch) | ★★☆☆☆ (Android 支持不佳) | ★★★☆☆ (需手动配置) |
-| **本项目** | ★★☆☆☆ (不稳定) | ★★★★☆ (ONNX 优化) | ★★★☆☆ (支持 ARM/x86) | ★★★★☆ (Android 需手动执行构建脚本) |
-
-
-其他TTS方案
-| 方案 | TTS 效果 | 性能 | 平台兼容性 | 易用性 |
-| :--- | :--- | :--- | :--- | :--- |
-| **[Qwen3TTS](https://github.com/predict-woo/qwen3-tts.cpp)** | ★★★★★ (效果优秀) | ★★☆☆☆ (GGML优化，但是模型本身开销大) | ★★★★☆ (理论支持全平台，但平台性能要求高) | ★★★★☆ (需要转换模型) |
-
------
-
-## 使用建议
-
-根据您的具体需求，推荐如下：
-
-* **追求极致性能和易用性的 Android 平台**：
-  * ✅ **推荐使用 `sherpa-onnx`**
-* **追求高拟真度且在 x86 平台（Linux/Windows, CUDA/CPU）**：
-  * ✅ **推荐使用 `GPT-SoVITS-RS`**
-* **追求高拟真度且需要在 Android 和 x86 CPU 上运行**：
-  * ✅ **可以尝试本项目**，并欢迎帮助改进！
-
------
-
-## 模型下载
-
-如果您不想自行训练和导出模型，可以使用预训练模型进行快速体验。
-
-* **主模型下载地址**：[huggingface.co/mikv39/gpt-sovits-onnx-custom](https://huggingface.co/mikv39/gpt-sovits-onnx-custom)
-建议按下文流程自行导出官方 v2Pro quality。HF 下载包将在后续更新；新的
-模型文件统一为 `vits.onnx`、`t2s_encoder.onnx`、
-`t2s_fs_decoder.onnx`、`t2s_s_decoder.onnx`，不保留旧前缀。
-
-**g2p_en 英文 G2P**：HF 预训练包已内置 `g2p_en/`。若自行导出模型，macOS 流程会在 `04_download_models.sh` 自动下载；也可从 [cisco-ai/mini-bart-g2p](https://huggingface.co/cisco-ai/mini-bart-g2p/tree/main/onnx) 手动获取并放入模型目录的 `g2p_en/` 子文件夹。
-
-### 参考音频（ref.wav）
-
-`gpt_sovits_demo` 从模型目录读取 `ref.wav`。请自行准备参考 WAV，
-将其复制到所选模型目录并命名为 `ref.wav`。`--ref-text` 必须是该音频的
-准确转录，`--text` 是需要合成的文字；下列占位符需自行替换。
+在仓库根目录执行。准备 Git、Rust、CMake、FFmpeg，以及 conda 或 uv。首次导出先准备上游代码和权重。
 
 ```bash
-MODEL_DIR=./gpt-sovits-upstream/onnx-patched/v2pro-quality
-```
-
-运行 demo 时通过 CLI 指定参考文本与合成文本；采样参数使用程序内置默认值：
-
-```bash
-cargo run --release --example gpt_sovits_demo -- \
-  --model-path "${MODEL_DIR}" \
-  --text "<待合成文本>" \
-  --ref-text "<参考音频的准确转录>" \
-  --output output.wav
-```
-
-或使用 CLI 逐项指定：
-
-```bash
-cargo run --release --example gpt_sovits_demo -- \
-  --model-path "${MODEL_DIR}" \
-  --ref-text "<参考音频的准确转录>" \
-  --text "<待合成文本>" \
-  --top-k 4 --top-p 0.9 --temperature 1.0 --repetition-penalty 1.35
-```
-
-与 PyTorch 对比（报告在 `scripts/reports/`，不在仓库根目录）：
-
-```bash
-gpt-sovits-upstream/.venv/bin/python scripts/compare_onnx_versions.py
-```
-
-参考音频建议 **3–10 秒**；过长可能导致上游训练/推理报错。
-
-### 预处理说明
-
-| 组件 | 路径参数 | 作用 |
-|------|----------|------|
-| `bert.onnx` | `bert_path` | 中文 BERT 特征（缺失时用零向量，语速/韵律下降） |
-| `g2pW.onnx` | `g2pw_path` | 多音字 G2PW（缺失时用字典 fallback） |
-| `g2p_en/` | `g2p_en_path` | 英文 G2P ONNX（缺失时用 CMUdict） |
-
-- `LangId::Auto`：普通话 + 英文自动分词
-- `LangId::AutoYue`：粤语模式
-- 预处理与 Python 版对照：见 [scripts/README.md](scripts/README.md) 中的 parity 测试说明
-
------
-
-## 构建指南
-
-### 1\. 模型转换
-
-请参考 `scripts` 目录下的说明文档：[scripts/README.md](scripts/README.md)。
-
-**macOS 分阶段导出**（逐步运行，避免长时间一键等待）：
-
-```bash
-./scripts/export/01_clone.sh
+./scripts/export/01_clone.sh --upstream-ref 04a44eb977586645f33594b72af13a035a2056c6
 ./scripts/export/02_patch.sh
 ./scripts/export/03_setup_env.sh --source HF
 ./scripts/export/04_download_models.sh --version v2Pro
-./scripts/export/05_export.sh --version v2Pro --export-name v2pro-quality --quant --profile quality
-
-# v2ProPlus（与 v2Pro 共用 SV 分支，仅 SoVITS 权重不同）
-./scripts/export/04_download_models.sh --version v2ProPlus
-./scripts/export/05_export.sh --version v2ProPlus --export-name v2proplus --no-quant
-./scripts/export/validate_bundle.sh --bundle-dir gpt-sovits-upstream/onnx-patched/v2proplus --expect-v2pro
 ```
 
-详见 [scripts/README.md — macOS 分阶段导出](scripts/README.md#macos-分阶段导出)。
+根据运行平台选择一组命令。两个模型包都在 macOS 导出。
 
-### 2\. x86 平台构建和运行 (Linux/Windows/macOS)
-
-直接使用 Cargo 即可完成编译：
+**macOS 使用 `quality`。**
 
 ```bash
-cargo build --release
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro-macos \
+  --quant --profile quality --shared-kv --preoptimize-cpu
+MODEL_DIR=gpt-sovits-upstream/onnx-patched/v2pro-macos
 ```
 
-使用如下命令可以运行命令行 demo。该 demo 会根据模型目录下的 `vits.onnx` 载入 v2 / v2Pro / v2ProPlus（通过 `sv.onnx` 检测）。需先准备模型及自行选择的 `ref.wav`，见上文「参考音频」一节。
+**Android 使用 `mobile`。**
 
 ```bash
-RUST_LOG=debug cargo run --release --example gpt_sovits_demo -- \
-  --model-path /path/to/onnx-patched/v2proplus \
-  --text "<待合成文本>" \
-  --ref-text "<参考音频的准确转录>" \
-  --output output.wav
+./scripts/export/05_export.sh --version v2Pro --export-name v2pro-android \
+  --quant --profile mobile --shared-kv --preoptimize-cpu
+MODEL_DIR=gpt-sovits-upstream/onnx-patched/v2pro-android
 ```
 
-Demo 支持 `--text`、`--ref-text`、`--top-k`、`--top-p`、`--temperature`、`--repetition-penalty`、`--seed`、`--output` 等参数；可选 `--params` 覆盖内置采样默认值。
+### 2. 生成流式模型包
 
-### 3\. Android 平台构建
+`05_export.sh` 产出可直接用于整段推理的普通 VITS。推荐的流式流程继续拆分参考音图，再生成
+带 `stream_start_frame` 的流式 VITS。先在当前终端激活导出环境。
 
-> ⚠️ **重要提示**
->
-> 为确保 ONNX Runtime 版本的灵活性与及时更新，**本项目不提供预构建的二进制文件**。您需要根据以下步骤自行构建。
+```bash
+conda activate GPTSoVits
+# 如果通过 uv 准备环境，改用 source gpt-sovits-upstream/.venv/bin/activate
 
-1. **环境准备**:
-      * 安装 CMake ≥ 3.28 (推荐使用 Conda 安装以避免系统版本限制)。
-      * 下载并配置 Android NDK 与 SDK，并设置好相关环境变量。
-      * 在~/.cargo/config.toml中设置好`[target.aarch64-linux-android]`的linker和ar,注意androidN-clang的N最好>=28，
-        * 最好保证build_for_android.sh中的android_api参数一致
-        * 如果是较新版本的android系统，请使用16k page size `rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]`
-
-      ```toml
-      [target.aarch64-linux-android]
-      linker = "/android-ndk-r27c//toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android32-clang"
-      ar = "/android-ndk-r27c//toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-      rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
-      ```
-
-2. **首次构建**:
-      * 运行一键式脚本，该脚本将自动完成 ONNX Runtime 源码下载、编译，并构建适用于 Android 的可执行文件和动态库。
-    <!-- end list -->
-    ```bash
-    ./build_for_android.sh
-    ```
-
-3. **后续增量构建**:
-      * 如果仅修改了 Rust 代码，可直接使用 Cargo 命令进行编译。
-    <!-- end list -->
-    ```bash
-    cargo build --target aarch64-linux-android --release --features jni --examples
-    ```
-
-## 嵌入应用的共享 ORT 线程池
-
-依赖统一为 `ort / ort-sys =2.0.0-rc.13`、`ndarray =0.17.2`。
-`knf-rs-sys` 使用 `bailu-obj/pyannote-rs` 的固定 Git revision，包含 Android
-ABI、bindgen 和 C++ 链接修复；不依赖外部应用的 Cargo patch。
-
-默认保留原有独立 session 线程池。需要由宿主统一线程预算时，可启用
-`shared-ort-pool` feature，在加载任何 ONNX 模型前初始化环境：
-
-```rust
-let pool = ort::environment::GlobalThreadPoolOptions::default()
-    .with_intra_threads(4)?
-    .with_inter_threads(1)?
-    .with_spin_control(false)?;
-ort::init().with_global_thread_pool(pool).commit();
-// 此后再创建 TTSModel；Android 动态加载使用 ort::init_from(库绝对路径)。
+CACHED_DIR="${MODEL_DIR}-cached"
+STREAM_DIR="${MODEL_DIR}-stream"
+python scripts/vits_dynamic.py "$MODEL_DIR/vits.onnx" --split-reference-dir "$CACHED_DIR"
+rsync -a --exclude='/vits.onnx' --exclude='/vits_ref.onnx' \
+  --exclude='/ref.wav' --exclude='/ref.txt' --exclude='/reference.wav' --exclude='/reference.txt' \
+  "$MODEL_DIR/" "$CACHED_DIR/"
+mkdir -p "$STREAM_DIR"
+rsync -a --exclude='/vits.onnx' "$CACHED_DIR/" "$STREAM_DIR/"
+python scripts/vits_streaming.py "$CACHED_DIR/vits.onnx" "$STREAM_DIR/vits.onnx"
+./scripts/export/validate_bundle.sh --bundle-dir "$STREAM_DIR" --expect-v2pro --expect-streaming
 ```
 
-该 feature 让全部 GPT-SoVITS session 使用宿主的共享池，默认关闭等待自旋。
-不改变模型图、采样或 PCM 输出。宿主应在 VAD 等其他 ORT 使用者之前初始化。
-线程数由宿主决定，上例的四线程不是硬件性能结论。
+### 3. macOS 构建与使用
 
-等待自旋可在运行时配置；在创建任何模型之前调用：
+`cargo run` 会构建并运行示例。参考音与模型包分开保存，运行时用 `--ref-audio` 指定 WAV，
+用 `--ref-text` 传入准确转录。省略 `--ref-audio` 时，CLI 读取当前工作目录的 `ref.wav`。
 
-```rust
-gpt_sovits_onnx_rs::configure_onnx_sessions(
-    gpt_sovits_onnx_rs::OnnxSessionOptions { spinning: true },
-).expect("configure before loading models");
+```bash
+cargo run --release --example gpt_sovits_demo -- \
+  --model-path "$STREAM_DIR" --stream \
+  --ref-audio /path/to/ref.wav \
+  --ref-text '<参考音频的准确转录>' --text '等雨停下来以后，我们可以沿着河边慢慢走到灯塔，再去那家小店坐一会儿。' \
+  --output stream.wav
 ```
 
-`spinning` 同时控制 session 的 intra-op / inter-op 等待自旋。
-独立池默认 `true`，共享池默认 `false`。首次创建 session 后配置冻结，
-重复配置返回错误。共享池的环境设置还需由宿主通过
-`GlobalThreadPoolOptions::with_spin_control` 设置为相同值。
+### 4. Android 构建与使用
 
-模型优化脚本按输出文件名判断模型类型；父目录名包含 `gpt-sovits`
-不会再使所有模型误入 VITS 分支而跳过量化。
+在 macOS 或 Linux 上准备 Android NDK、CMake、`curl` 和 `unzip`。设备端验证使用
+NDK r29（29.0.14206865）和 Android SDK Platform-Tools 的 `adb`。
+
+```bash
+rustup target add aarch64-linux-android
+export ANDROID_NDK_ROOT=/path/to/android-ndk
+./build_for_android.sh
+
+DEVICE_DIR=/data/local/tmp/gpt-sovits
+adb shell "mkdir -p '$DEVICE_DIR'"
+adb push target/android/gpt_sovits_demo "$DEVICE_DIR/gpt_sovits_demo"
+adb push target/android/lib "$DEVICE_DIR/lib"
+adb push "$STREAM_DIR" "$DEVICE_DIR/models"
+adb push /path/to/ref.wav "$DEVICE_DIR/ref.wav"
+adb shell "chmod 700 '$DEVICE_DIR/gpt_sovits_demo'"
+adb shell "LD_LIBRARY_PATH='$DEVICE_DIR/lib' '$DEVICE_DIR/gpt_sovits_demo' \
+  --ort-library '$DEVICE_DIR/lib/libonnxruntime.so' --model-path '$DEVICE_DIR/models' \
+  --ref-audio '$DEVICE_DIR/ref.wav' \
+  --stream --ref-text '<参考音频的准确转录>' --text '等雨停下来以后，我们可以沿着河边慢慢走到灯塔，再去那家小店坐一会儿。' \
+  --output '$DEVICE_DIR/stream.wav'"
+adb pull "$DEVICE_DIR/stream.wav" target/android/stream.wav
+```
+
+设备上使用新的测试目录。构建产物包含 CLI、运行库和演示整段推理的 JNI 示例。
+
+## 支持范围
+
+| 能力 | 当前支持 |
+| --- | --- |
+| 模型 | v2、v2Pro、v2ProPlus 整段推理。v2Pro 流式模型在 macOS 导出，已在 macOS 和 Android 实测 |
+| 语言 | 普通话和英文自动处理，支持中英混读。粤语使用 CLI 的 `--lang yue` 或 Rust 的 `LangId::AutoYue` |
+| 音色 | WAV 和准确转录作为参考输入。Pro 系列使用 `sv.onnx` 提取说话人特征，可拆分参考图并缓存 `ge` |
+| 部署 | Rust 库、命令行示例和 Android JNI 示例。下文的性能数据来自 macOS Apple Silicon 和 Android arm64 |
+
+推荐的 v2Pro 模型包使用官方 `s1v3.ckpt` 和 `v2Pro/s2Gv2Pro.pth`。`quality` 保留
+T2S 和 VITS 的浮点计算，将 BERT 和 G2PW 的 MatMul 权重转为 INT8。`mobile` 对
+逐 token 解码采用 INT4 投影，可按需要校准部分 VITS 卷积。建议使用 3–10 秒的清晰参考音。
+[模型导出与量化配置](scripts/README.md)
+
+## 推理流程
+
+1. **文本前端**先断句和规范化文本，再结合 BERT、G2PW 和英文 G2P 生成发音和文本特征。
+2. **T2S** 根据文本特征和参考语义生成语义 token。支持共享 KV 布局的模型会在逐 token 解码期间复用缓存。
+3. **VITS** 根据语义 token 和参考音条件生成 PCM。整段模式汇总完整音频。流式模式在 T2S
+   继续解码时开始生成可播放的 PCM，Adaptive 根据播放余量和近期合成耗时调整后续块长。
+
+在同一模型实例上重新调用 `process_reference_sync`，即可用新的 WAV 路径和转录切换音色。
+使用 `vits_ref.onnx` 的模型包也会在这一步缓存 `ge`，后续合成复用。
+
+## 性能
+
+v2Pro CPU Adaptive 以 8 个语义 token 起步，使用相同的 25 条文本做热机测试。
+RTF 为合成耗时除以音频时长。
+
+| 设备 | 平均首包（TTFA） | 平均 RTF |
+| --- | ---: | ---: |
+| Mac M4 Pro | 175 ms | 0.108 |
+| Galaxy S25 Ultra | 386 ms | 0.271 |
+
+两组测试的模拟断供均为 0 次。S25 Ultra 另一次合成了 72 秒的多句音频，RTF 为 0.219。
+更长的单句实测出现过重复和漏读，长文可按自然句提交。
+[测试口径、分场景结果与长语音记录](doc/perf_record.md#cpu-句内流式)
+
+## CPU 推理接口
+
+| 用途 | 模型包 | CLI | Rust |
+| --- | --- | --- | --- |
+| 流式，边合成边播放 | 步骤 2 的 `$STREAM_DIR`，VITS 含 `stream_start_frame` | `--stream` | `synthesize_token_chunks_sync` 回调逐块交付 PCM |
+| 非流式，生成完整音频 | 步骤 1 的 `$MODEL_DIR`，普通 VITS | 默认模式 | `synthesize_sync` 返回 `(WavSpec, Vec<f32>)` |
+
+整段推理直接使用步骤 1 的模型包。把上面命令的 `--model-path` 指向普通包，并省略
+`--stream`。已有模型包可用 `--expect-ordinary` 或 `--expect-streaming` 校验。
+
+Rust 调用方用 `TTSModel::from_bundle` 加载模型，再按上表选择接口。流式接口缺少对应的
+VITS 图时返回错误。[Rust 命令行示例](examples/gpt_sovits_demo.rs) · [Android JNI 示例](examples/gpt_sovits_demo_jni.rs)
+
+## 更新记录
+
+### 2026-11
+
+- Android CPU 实时性优化加入共享 KV、参考音缓存和选择性 CPU 预融合。
+- 普通 VITS 通过 `synthesize_sync` 整段交付，流式 VITS 通过 `synthesize_token_chunks_sync`
+  使用 Adaptive。旧异步 `synthesize` 调用方可按交付方式迁移。
+- 增加独立模型校验和 Android 构建，公开 Mac M4 Pro 与 S25 Ultra 实测数据。
+- 增加手动加载的 Qualcomm QNN pipeline，支持 128 帧 W8A16 HTP 逐窗口交付和设备端 `EPContext`。
+
+### 2026-07
+
+- 对齐 GPT-SoVITS Python 的中文预处理、参考音填充和 T2S 采样。
+- 验证 v2Pro 与 v2ProPlus 的导出和推理。[v2ProPlus 验证](doc/v2proplus_validation.md)
+
+## 可选的 Qualcomm QNN pipeline
+
+在支持 Qualcomm HTP 的 Android 设备上用 `./build_for_android.sh --qnn` 准备运行库。
+运行时用 `--model-path` 指定独立 QNN 包，用 `--qnn-libraries` 显式启用。
+[QNN 模型准备与真机运行](scripts/README.md#qualcomm-qnn-pipeline) · [QNN 性能记录](doc/perf_record.md#qualcomm-qnn-pipeline)

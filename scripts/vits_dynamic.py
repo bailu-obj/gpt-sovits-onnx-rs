@@ -84,16 +84,44 @@ def validate_vits_masks(model):
     return [node.name for node, _, _ in masks]
 
 
+def validate_vits_interface(model, inputs):
+    actual = {value.name: value for value in model.graph.input}
+    expected = set(inputs)
+    outputs = {"audio"}
+    if "stream_start_frame" in actual:
+        expected.add("stream_start_frame")
+        if "stream_latent_history" in actual or "stream_commit_frames" in actual:
+            if "ge" not in inputs:
+                raise ValueError("VITS latent history requires cached ge")
+            expected.update(("stream_latent_history", "stream_commit_frames"))
+            outputs.add("stream_next_history")
+        for name in ("stream_start_frame", "stream_commit_frames"):
+            if name in actual:
+                tensor = actual[name].type.tensor_type
+                if tensor.elem_type != onnx.TensorProto.INT64 or [
+                    dim.dim_value for dim in tensor.shape.dim
+                ] != [1]:
+                    raise ValueError(f"{name} must be int64[1]")
+    if set(actual) != expected or {value.name for value in model.graph.output} != outputs:
+        raise ValueError("unexpected VITS graph interface")
+    if "stream_latent_history" in actual:
+        history_output = next(value for value in model.graph.output if value.name == "stream_next_history")
+        for value in (actual["stream_latent_history"], history_output):
+            tensor = value.type.tensor_type
+            if tensor.elem_type != onnx.TensorProto.FLOAT or [
+                dim.dim_value for dim in tensor.shape.dim
+            ] != [1, 192, 0]:
+                raise ValueError(f"{value.name} must be float32[1,192,dynamic_frames]")
+
+
 def validate_split_reference(reference, decoder):
-    for model, inputs, outputs in (
-        (reference, {"ref_audio", "sv_emb"}, {"ge"}),
-        (decoder, {"text_seq", "pred_semantic", "ge"}, {"audio"}),
-    ):
-        if {value.name for value in model.graph.input} != inputs or {
-            value.name for value in model.graph.output
-        } != outputs:
-            raise ValueError("unexpected split VITS graph interface")
-        onnx.checker.check_model(model)
+    if {value.name for value in reference.graph.input} != {"ref_audio", "sv_emb"} or {
+        value.name for value in reference.graph.output
+    } != {"ge"}:
+        raise ValueError("unexpected VITS reference graph interface")
+    validate_vits_interface(decoder, {"text_seq", "pred_semantic", "ge"})
+    onnx.checker.check_model(reference)
+    onnx.checker.check_model(decoder)
     if reference.graph.output[0].type != next(
         value.type for value in decoder.graph.input if value.name == "ge"
     ):

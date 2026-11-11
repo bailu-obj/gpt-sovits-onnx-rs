@@ -1,5 +1,3 @@
-use async_stream::stream;
-use futures::{Stream, StreamExt};
 use hound::{WavReader, WavSpec};
 use log::{debug, info};
 use ndarray::{
@@ -25,10 +23,15 @@ mod infer_params;
 mod logits_sampler;
 mod onnx_builder;
 pub use onnx_builder::{OnnxSessionOptions, configure_onnx_sessions};
+#[cfg(target_os = "android")]
+mod qnn_pipeline;
 mod postprocess;
 mod preprocessor;
 mod sv;
 mod t2s_cache;
+mod token_stream;
+pub use token_stream::TokenStreamOptions;
+mod vocoder;
 
 use onnx_builder::create_onnx_cpu_session;
 pub use postprocess::{PostprocessParams, audio_postprocess, recovery_order};
@@ -39,6 +42,7 @@ pub use preprocessor::{TextProcessor, bert, en, phoneme_finalize, text_normalize
 use logits_sampler::Sampler;
 use preprocessor::{bert::BertModel, en::g2p_en::G2pEn, zh::g2pw::G2PW};
 use t2s_cache::{CACHE_RESERVE, CacheLayout, LayerCache, SharedKvCache};
+use vocoder::Vocoder;
 
 pub use error::GSVError;
 pub use infer_params::InferParams;
@@ -52,11 +56,19 @@ const DEFAULT_NUM_LAYERS: usize = 24;
 const MAX_DECODER_STEPS: usize = 1501;
 /// Product of VITS `upsample_rates` for v2 / v2Pro / v2ProPlus (`[10, 8, 2, 2, 2]`).
 const VITS_UPSAMPLE_RATE: usize = 640;
+const VITS_FRAMES_PER_TOKEN: usize = 2;
 
 /// Expected VITS waveform length before postprocess, matching Python
 /// `pred_semantic.shape[0] * 2 * upsample_rate`.
 fn vits_output_samples(semantic_token_count: usize) -> usize {
-    semantic_token_count * 2 * VITS_UPSAMPLE_RATE
+    semantic_token_count * VITS_FRAMES_PER_TOKEN * VITS_UPSAMPLE_RATE
+}
+
+fn semantic_at_stop(sequence: &[i64], prefix_len: usize, step: usize) -> (&[i64], Vec<i64>) {
+    let legacy = logits_sampler::extract_semantic_tokens(sequence, prefix_len, step);
+    // Keep the legacy output length and preserve tokens already sent to VITS.
+    let start = prefix_len + 1;
+    (&sequence[start..start + legacy.len()], legacy)
 }
 
 static STANDALONE_TOKIO_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -97,7 +109,8 @@ pub struct ReferenceData {
     ref_seq: Array2<i64>,
     ref_bert: Array2<f32>,
     vits: VitsReference,
-    ssl_content: ArrayBase<OwnedRepr<f32>, IxDyn>,
+    ssl_shape: Vec<usize>,
+    prompts: ArrayD<i64>,
     sv_emb: Option<ArrayD<f32>>,
 }
 
@@ -109,7 +122,7 @@ enum VitsReference {
 
 pub struct TTSModel {
     text_processor: TextProcessor,
-    sovits: Session,
+    sovits: Option<Vocoder>,
     sovits_reference: Option<Session>,
     ssl: Session,
     t2s_encoder: Session,
@@ -127,11 +140,42 @@ pub struct TTSModel {
 }
 
 impl TTSModel {
-    /// create new tts instance
-    /// bert_path, g2pw_path and g2p_en_path can be None
-    /// if bert path is none, the speech speed in chinese may become worse
-    /// if g2pw path is none, the chinese speech quality may be worse
-    /// g2p_en is still experimental, english speak quality may not be better because of bugs
+    /// Capture real text and semantic inputs for calibrating a QNN VITS generator.
+    pub fn qnn_calibration_inputs(
+        &mut self,
+        text: &str,
+        sampling: SamplingParams,
+        lang: LangId,
+    ) -> Result<Vec<serde_json::Value>, GSVError> {
+        let reference = self
+            .ref_data
+            .as_ref()
+            .ok_or_else(|| GSVError::from("Reference data not initialized"))?
+            .clone();
+        let VitsReference::Features(ge) = &reference.vits else {
+            return Err(GSVError::from("QNN calibration requires a split VITS reference graph"));
+        };
+        let mut inputs = Vec::new();
+        for (_, phones, bert) in self.text_processor.get_phone_and_bert(text, lang)? {
+            let tokens = self.synthesize_semantic(&bert, &phones, &reference, sampling)?;
+            inputs.push(serde_json::json!({
+                "text_seq": phones,
+                "pred_semantic": tokens.iter().copied().collect::<Vec<_>>(),
+                "ge": ge.iter().copied().collect::<Vec<_>>(),
+                "ge_shape": ge.shape(),
+            }));
+        }
+        if inputs.is_empty() {
+            return Err(GSVError::from("No QNN calibration inputs generated"));
+        }
+        Ok(inputs)
+    }
+
+    /// Load a TTS model with the VITS graph for the intended inference mode.
+    /// Use an ordinary graph for [`Self::synthesize_sync`] or a graph with
+    /// `stream_start_frame` for [`Self::synthesize_token_chunks_sync`].
+    /// A decoder with cached `ge` loads `vits_ref.onnx` from the same directory.
+    /// The BERT, Chinese G2P, and English G2P paths are optional.
     pub fn new<P: AsRef<Path>>(
         sovits_path: P,
         ssl_path: P,
@@ -196,7 +240,7 @@ impl TTSModel {
                 G2pEn::new(g2p_en_path)?,
                 BertModel::new(bert_path)?,
             )?,
-            sovits,
+            sovits: Some(Vocoder::new(sovits)),
             sovits_reference,
             ssl: create_onnx_cpu_session(ssl_path)?,
             t2s_encoder: create_onnx_cpu_session(t2s_encoder_path)?,
@@ -215,6 +259,22 @@ impl TTSModel {
             num_layers,
             output_spec,
         })
+    }
+
+    /// Load the standard ONNX files from the supplied model directory.
+    pub fn from_bundle(root: &Path) -> Result<Self, GSVError> {
+        let sv = root.join("sv.onnx");
+        Self::new(
+            root.join("vits.onnx"),
+            root.join("ssl.onnx"),
+            root.join("t2s_encoder.onnx"),
+            root.join("t2s_fs_decoder.onnx"),
+            root.join("t2s_s_decoder.onnx"),
+            Some(root.join("bert.onnx")),
+            Some(root.join("g2pW.onnx")),
+            Some(root.join("g2p_en")),
+            sv.is_file().then_some(sv),
+        )
     }
 
     fn run_async_in_context<F, T>(fut: F) -> Result<T, GSVError>
@@ -256,6 +316,13 @@ impl TTSModel {
         let (ref_audio_16k, ref_audio_16k_raw, ref_audio_32k) =
             read_and_resample_audio(&reference_audio_path)?;
         let ssl_content = self.process_ssl(&ref_audio_16k)?;
+        let ssl_shape = ssl_content.shape().to_vec();
+        let prompts = {
+            let output = self.t2s_encoder.run(inputs![
+                "ssl_content" => TensorRef::from_array_view(&ssl_content)?
+            ])?;
+            output["prompts"].try_extract_array::<i64>()?.into_owned()
+        };
 
         let sv_emb = match &mut self.sv {
             Some(sv_model) => {
@@ -298,7 +365,8 @@ impl TTSModel {
             ref_bert,
             sv_emb,
             vits,
-            ssl_content,
+            ssl_shape,
+            prompts,
         }));
 
         Ok(())
@@ -378,12 +446,7 @@ impl TTSModel {
         let bert = concatenate(Axis(1), &[ref_data.ref_bert.t(), text_bert.t()])?;
         let bert = bert.insert_axis(Axis(0)).to_owned();
 
-        let encoder_output = self.t2s_encoder.run(inputs![
-            "ssl_content" => TensorRef::from_array_view(&ref_data.ssl_content)?
-        ])?;
-        let prompts = encoder_output["prompts"]
-            .try_extract_array::<i64>()?
-            .into_owned();
+        let prompts = &ref_data.prompts;
 
         let fs_decoder_output = self.t2s_fs_decoder.run(inputs![
             "x" => TensorRef::from_array_view(&x.as_standard_layout())?,
@@ -406,7 +469,7 @@ impl TTSModel {
             "bert_mean": bert.mean().unwrap_or(0.0),
             "prompts_len": prompts.shape()[1],
             "prompts_head": prompts.slice(s![0, ..5]).iter().copied().collect::<Vec<_>>(),
-            "ssl_shape": ref_data.ssl_content.shape().to_vec(),
+            "ssl_shape": ref_data.ssl_shape,
             "fs_argmax_masked": argmax,
         }))
     }
@@ -419,7 +482,8 @@ impl TTSModel {
         mut y_vec: Vec<i64>,
         mut caches: Vec<LayerCache>,
         prefix_len: usize,
-    ) -> Result<ArrayBase<OwnedRepr<i64>, IxDyn>, GSVError> {
+        mut progress: impl FnMut(&[i64], bool) -> bool,
+    ) -> Result<Option<ArrayBase<OwnedRepr<i64>, IxDyn>>, GSVError> {
         let mut idx = 0;
         y_vec.reserve(2048);
 
@@ -502,17 +566,23 @@ impl TTSModel {
                 || sampled == T2S_DECODER_EOS
                 || argmax == T2S_DECODER_EOS
             {
-                let sliced = logits_sampler::extract_semantic_tokens(&y_vec, prefix_len, idx);
+                let (stable, sliced) = semantic_at_stop(&y_vec, prefix_len, idx);
                 debug!(
                     "t2s final len: {}, prefix_len: {}, stop_idx: {}",
                     sliced.len(),
                     prefix_len,
                     idx
                 );
+                if !progress(stable, true) {
+                    return Ok(None);
+                }
                 let y = ArrayD::from_shape_vec(IxDyn(&[1, 1, sliced.len()]), sliced)?;
-                return Ok(y);
+                return Ok(Some(y));
             }
 
+            if !progress(&y_vec[prefix_len + 1..], false) {
+                return Ok(None);
+            }
             if old_capacity.is_none() {
                 for (i, cache) in caches.iter_mut().enumerate() {
                     *cache = take_kv_pair(
@@ -547,126 +617,32 @@ impl TTSModel {
         }
     }
 
-    /// synthesize async
-    ///
-    /// `text` is input text for run
-    ///
-    /// `lang_id` can be LangId::Auto(Mandarin) or LangId::AutoYue（cantonese）
-    ///
-    pub async fn synthesize(
+    fn synthesize_semantic(
         &mut self,
-        text: &str,
-        sampling_param: SamplingParams,
-        lang_id: LangId,
-        postprocess_params: PostprocessParams,
-    ) -> Result<
-        (
-            WavSpec,
-            impl Stream<Item = Result<f32, GSVError>> + Send + Unpin,
-        ),
-        GSVError,
-    > {
-        debug!("g2pw synth start");
-        let ref_data = self
-            .ref_data
-            .as_ref()
-            .ok_or(GSVError::from("Reference data not initialized"))?;
-        let spec = self.output_spec;
-        let time = SystemTime::now();
-        let texts_and_seqs = self.text_processor.get_phone_and_bert(&text, lang_id)?;
-        debug!("g2pw and preprocess time: {:?}", time.elapsed()?);
-        let ref_data = ref_data.clone();
-        let sample_rate = spec.sample_rate;
-
-        let stream = stream! {
-            let mut fragments = Vec::new();
-            for (text, seq, bert) in texts_and_seqs {
-                debug!("process: {:?}", text);
-                match self.in_stream_once_gen(&text, &bert, &seq, &ref_data, sampling_param).await {
-                    Ok(samples) => fragments.push(samples),
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
-                }
-            }
-
-            let final_audio = audio_postprocess(
-                vec![fragments],
-                sample_rate,
-                &postprocess_params,
-                None,
-            );
-            for sample in final_audio {
-                yield Ok(sample);
-            }
-        };
-
-        Ok((spec, Box::pin(stream)))
-    }
-
-    /// Sentence-level streaming: each item is a complete, postprocessed waveform.
-    /// VITS does not stream within a sentence. Polling the next item starts the
-    /// next sentence; dropping the stream stops subsequent inference.
-    pub async fn synthesize_sentence_chunks(
-        &mut self,
-        text: &str,
-        sampling_param: SamplingParams,
-        lang_id: LangId,
-        postprocess_params: PostprocessParams,
-    ) -> Result<
-        (
-            WavSpec,
-            impl Stream<Item = Result<Vec<f32>, GSVError>> + Send + Unpin,
-        ),
-        GSVError,
-    > {
-        let ref_data = self
-            .ref_data
-            .as_ref()
-            .ok_or_else(|| GSVError::from("Reference data not initialized"))?
-            .clone();
-        let spec = self.output_spec;
-        let fragments = self.text_processor.get_phone_and_bert(text, lang_id)?;
-        let stream = stream! {
-            for (text, seq, bert) in fragments {
-                match self.in_stream_once_gen(&text, &bert, &seq, &ref_data, sampling_param).await {
-                    Ok(samples) => yield Ok(audio_postprocess(
-                        vec![vec![samples]], spec.sample_rate, &postprocess_params, None,
-                    )),
-                    Err(error) => { yield Err(error); break; }
-                }
-            }
-        };
-        Ok((spec, Box::pin(stream)))
-    }
-
-    /// Blocking bridge with backpressure and cancellation between sentences.
-    /// Return false from `emit` to stop before another sentence is synthesized.
-    pub fn synthesize_sentences_sync(
-        &mut self,
-        text: &str,
-        sampling_param: SamplingParams,
-        lang_id: LangId,
-        postprocess_params: PostprocessParams,
-        emit: impl FnMut(WavSpec, Vec<f32>) -> bool,
-    ) -> Result<(), GSVError> {
-        Self::run_async_in_context(async {
-            let (spec, chunks) = self
-                .synthesize_sentence_chunks(text, sampling_param, lang_id, postprocess_params)
-                .await?;
-            emit_sentence_chunks(spec, chunks, emit).await
-        })
-    }
-
-    async fn in_stream_once_gen(
-        &mut self,
-        _text: &str,
         text_bert: &Array2<f32>,
         text_seq_vec: &[i64],
         ref_data: &ReferenceData,
         sampling_param: SamplingParams,
-    ) -> Result<Vec<f32>, GSVError> {
+    ) -> Result<ArrayD<i64>, GSVError> {
+        Ok(self
+            .synthesize_semantic_with_progress(
+                text_bert,
+                text_seq_vec,
+                ref_data,
+                sampling_param,
+                |_, _| true,
+            )?
+            .expect("semantic synthesis continues through EOS"))
+    }
+
+    fn synthesize_semantic_with_progress(
+        &mut self,
+        text_bert: &Array2<f32>,
+        text_seq_vec: &[i64],
+        ref_data: &ReferenceData,
+        sampling_param: SamplingParams,
+        progress: impl FnMut(&[i64], bool) -> bool,
+    ) -> Result<Option<ArrayD<i64>>, GSVError> {
         let text_seq: ArrayView2<'_, i64> =
             ArrayView2::from_shape((1, text_seq_vec.len()), text_seq_vec)
                 .map_err(|_| GSVError::from("invalid text sequence layout"))?;
@@ -675,16 +651,7 @@ impl TTSModel {
             None => Sampler::new(VOCAB_SIZE),
         };
 
-        let prompts = {
-            let time = SystemTime::now();
-            let encoder_output = self.t2s_encoder.run(inputs![
-                "ssl_content" => TensorRef::from_array_view(&ref_data.ssl_content)?
-            ])?;
-            debug!("T2S Encoder time: {:?}", time.elapsed()?);
-            encoder_output["prompts"]
-                .try_extract_array::<i64>()?
-                .into_owned()
-        };
+        let prompts = &ref_data.prompts;
 
         let mut y_vec: Vec<i64> = prompts.iter().copied().collect();
         let prefix_len = y_vec.len();
@@ -698,7 +665,7 @@ impl TTSModel {
             let time = SystemTime::now();
             let mut fs_decoder_output = self.t2s_fs_decoder.run(inputs![
                 "x" => TensorRef::from_array_view(&x.as_standard_layout())?,
-                "prompts" => TensorRef::from_array_view(&prompts)?,
+                "prompts" => TensorRef::from_array_view(prompts)?,
                 "bert" => TensorRef::from_array_view(&bert.as_standard_layout())?,
             ])?;
             debug!("T2S FS Decoder time: {:?}", time.elapsed()?);
@@ -726,62 +693,21 @@ impl TTSModel {
         };
 
         let time = SystemTime::now();
-        let pred_semantic =
-            self.run_t2s_s_decoder_loop(&mut sampler, sampling_param, y_vec, caches, prefix_len)?;
+        let pred_semantic = self.run_t2s_s_decoder_loop(
+            &mut sampler,
+            sampling_param,
+            y_vec,
+            caches,
+            prefix_len,
+            progress,
+        )?;
         debug!("T2S S Decoder all time: {:?}", time.elapsed()?);
 
-        let time = SystemTime::now();
-        let outputs = match (&ref_data.vits, &ref_data.sv_emb) {
-            (VitsReference::Features(ge), _) => self.sovits.run(inputs![
-                "text_seq" => TensorRef::from_array_view(text_seq)?,
-                "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
-                "ge" => TensorRef::from_array_view(ge)?,
-            ])?,
-            (VitsReference::Audio(audio), Some(sv_emb)) => self.sovits.run(inputs![
-                "text_seq" => TensorRef::from_array_view(text_seq)?,
-                "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
-                "ref_audio" => TensorRef::from_array_view(audio)?,
-                "sv_emb" => TensorRef::from_array_view(sv_emb)?,
-            ])?,
-            (VitsReference::Audio(audio), None) => self.sovits.run(inputs![
-                "text_seq" => TensorRef::from_array_view(text_seq)?,
-                "pred_semantic" => TensorRef::from_array_view(&pred_semantic)?,
-                "ref_audio" => TensorRef::from_array_view(audio)?,
-            ])?,
-        };
-        debug!("SoVITS all time: {:?}", time.elapsed()?);
-        let semantic_len = pred_semantic.shape()[2];
-        let expected_samples = vits_output_samples(semantic_len);
-        if let Some(slice) = pred_semantic.as_slice() {
-            let preview: Vec<_> = slice.iter().take(8).copied().collect();
-            debug!("pred_semantic len={}, head={:?}", semantic_len, preview);
-        }
-        let output_audio = outputs["audio"].try_extract_array::<f32>()?;
-        let (mut audio, _) = output_audio.into_owned().into_raw_vec_and_offset();
-        // ONNX VITS returns dynamic-length audio after export fix; only trim excess padding.
-        if audio.len() > expected_samples {
-            audio.truncate(expected_samples);
-        }
-        debug!(
-            "SoVITS output cropped to {} samples (semantic_len={})",
-            audio.len(),
-            semantic_len
-        );
-        for sample in &mut audio {
-            if !sample.is_finite() {
-                *sample = 0.0;
-            }
-        }
-
-        Ok(audio)
+        Ok(pred_semantic)
     }
 
-    /// synthesize
-    ///
-    /// `text` is input text for run
-    ///
-    /// `lang_id` can be LangId::Auto(Mandarin) or LangId::AutoYue（cantonese）
-    ///
+    /// Synthesize the complete waveform using an ordinary CPU VITS graph.
+    /// Returns the output format and all PCM samples after postprocessing.
     pub fn synthesize_sync(
         &mut self,
         text: &str,
@@ -789,82 +715,103 @@ impl TTSModel {
         lang_id: LangId,
         postprocess_params: PostprocessParams,
     ) -> Result<(WavSpec, Vec<f32>), GSVError> {
-        Self::run_async_in_context(async {
-            let (spec, stream) = self
-                .synthesize(text, sampling_param, lang_id, postprocess_params)
-                .await?;
-            let mut samples = Vec::new();
-            futures::pin_mut!(stream);
-            while let Some(sample) = stream.next().await {
-                samples.push(sample?);
-            }
-            Ok((spec, samples))
-        })
-    }
-}
-
-async fn emit_sentence_chunks(
-    spec: WavSpec,
-    mut chunks: impl Stream<Item = Result<Vec<f32>, GSVError>> + Unpin,
-    mut emit: impl FnMut(WavSpec, Vec<f32>) -> bool,
-) -> Result<(), GSVError> {
-    while let Some(chunk) = chunks.next().await {
-        if !emit(spec, chunk?) {
-            break;
+        if self.has_streaming_vits() {
+            return Err(GSVError::from(
+                "Non-streaming synthesis requires an ordinary VITS graph",
+            ));
         }
+        let reference = self
+            .ref_data
+            .as_ref()
+            .ok_or_else(|| GSVError::from("Reference data not initialized"))?
+            .clone();
+        let sentences = self.text_processor.get_phone_and_bert(text, lang_id)?;
+        let mut fragments = Vec::with_capacity(sentences.len());
+        for (_, phones, bert) in sentences {
+            let semantic = self.synthesize_semantic(&bert, &phones, &reference, sampling_param)?;
+            let samples = self
+                .sovits
+                .as_mut()
+                .expect("vocoder is available outside the pipeline")
+                .render_from_frame(&phones, &semantic, &reference, 0)?;
+            fragments.push(samples);
+        }
+        let spec = self.output_spec;
+        let samples = audio_postprocess(vec![fragments], spec.sample_rate, &postprocess_params, None);
+        Ok((spec, samples))
     }
-    Ok(())
 }
 
 #[cfg(test)]
-mod sentence_stream_tests {
+mod reference_tests {
     use super::*;
-    #[tokio::test]
-    async fn stopping_after_first_sentence_does_not_poll_next_inference() {
-        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = produced.clone();
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: 32000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+
+    #[test]
+    #[ignore = "requires a local v2Pro bundle with split reference VITS and two reference WAVs"]
+    fn switching_reference_refreshes_text_and_audio_conditions() {
+        let bundle = std::env::var_os("GSV_TEST_BUNDLE").unwrap();
+        let first_wav = std::env::var_os("GSV_TEST_REF_WAV").unwrap();
+        let second_wav = std::env::var_os("GSV_TEST_ALT_REF_WAV").unwrap();
+        let text = std::env::var("GSV_TEST_REF_TEXT").unwrap();
+        let mut model = TTSModel::from_bundle(Path::new(&bundle)).unwrap();
+
+        let load = |model: &mut TTSModel, wav: &std::ffi::OsStr, transcript: &str| {
+            model
+                .process_reference_sync(Path::new(wav), transcript, LangId::Auto)
+                .unwrap();
+            model.reference_data().unwrap()
         };
-        let chunks = stream! {
-            for n in 1..=3 { counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed); yield Ok(vec![n as f32]); }
-        };
-        emit_sentence_chunks(spec, Box::pin(chunks), |_, samples| {
-            assert_eq!(samples, [1.0]);
-            false
-        })
-        .await
-        .unwrap();
-        assert_eq!(produced.load(std::sync::atomic::Ordering::Relaxed), 1);
+        fn ge(reference: &ReferenceData) -> &ArrayD<f32> {
+            let VitsReference::Features(features) = &reference.vits else {
+                panic!("expected cached VITS reference features");
+            };
+            features
+        }
+
+        let first = load(&mut model, &first_wav, &text);
+        let different_text = load(&mut model, &first_wav, "这是用来核对转录的另一段文字。");
+        assert!(first.ref_seq != different_text.ref_seq);
+        assert!(first.ref_bert != different_text.ref_bert);
+        assert!(first.prompts == different_text.prompts);
+        assert!(ge(&first) == ge(&different_text));
+
+        let different_audio = load(&mut model, &second_wav, &text);
+        assert!(first.ref_seq == different_audio.ref_seq);
+        assert!(first.prompts != different_audio.prompts);
+        assert!(first.sv_emb != different_audio.sv_emb);
+        assert!(ge(&first) != ge(&different_audio));
+
+        let restored = load(&mut model, &first_wav, &text);
+        assert!(first.ref_seq == restored.ref_seq);
+        assert!(first.ref_bert == restored.ref_bert);
+        assert!(first.prompts == restored.prompts);
+        assert!(first.sv_emb == restored.sv_emb);
+        assert!(ge(&first) == ge(&restored));
+
+        assert!(model.process_reference_sync(Path::new(&bundle), &text, LangId::Auto).is_err());
+        assert!(Arc::ptr_eq(&restored, &model.reference_data().unwrap()));
     }
-    #[tokio::test]
-    async fn sentence_order_and_errors_are_preserved() {
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: 32000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let chunks = futures::stream::iter(vec![
-            Ok(vec![1.0, 2.0]),
-            Ok(vec![3.0]),
-            Err(GSVError::from("failed sentence")),
-            Ok(vec![4.0]),
-        ]);
-        let mut actual = Vec::new();
-        assert!(
-            emit_sentence_chunks(spec, chunks, |s, samples| {
-                assert_eq!(s.sample_rate, 32000);
-                actual.push(samples);
-                true
-            })
-            .await
-            .is_err()
-        );
-        assert_eq!(actual, [vec![1.0, 2.0], vec![3.0]]);
+}
+
+#[cfg(test)]
+mod semantic_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_stop_preserves_stream_prefix_and_legacy_length() {
+        let (stable, legacy) = semantic_at_stop(&[900, 11, 12, 13, T2S_DECODER_EOS], 1, 2);
+        assert_eq!(stable, [12, 13]);
+        assert_eq!(stable, legacy);
+
+        let (stable, legacy) = semantic_at_stop(&[900, 11, 12, 13, 14], 1, 2);
+        assert_eq!(stable, [12, 13]); // EOS selected by argmax, sampled token differs.
+        assert_eq!(legacy, [13, 14]);
+
+        let mut full = vec![900, 11];
+        full.extend((0..MAX_DECODER_STEPS as i64).map(|step| step % 1000));
+        let (stable, legacy) = semantic_at_stop(&full, 1, MAX_DECODER_STEPS - 1);
+        assert_eq!(stable, &full[2..full.len() - 1]);
+        assert_eq!(stable.len(), legacy.len());
     }
 }
 

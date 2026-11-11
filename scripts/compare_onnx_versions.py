@@ -100,6 +100,7 @@ def run_rust(
     repo: Path,
     bundle: Path,
     params_path: Path | None,
+    ref_audio: Path,
     out_path: Path,
     text: str,
     ref_text: str,
@@ -114,6 +115,8 @@ def run_rust(
         "--",
         "--model-path",
         str(bundle),
+        "--ref-audio",
+        str(ref_audio),
         "--text",
         text,
         "--ref-text",
@@ -131,6 +134,7 @@ def run_t2s_snapshot(
     repo: Path,
     bundle: Path,
     params_path: Path | None,
+    ref_audio: Path,
     text: str,
     ref_text: str,
 ) -> dict:
@@ -144,6 +148,8 @@ def run_t2s_snapshot(
         "--",
         "--model-path",
         str(bundle),
+        "--ref-audio",
+        str(ref_audio),
         "--text",
         text,
         "--ref-text",
@@ -183,6 +189,12 @@ def main() -> int:
         help="Reference prompt text",
     )
     parser.add_argument(
+        "--ref-audio",
+        type=Path,
+        default=Path("ref.wav"),
+        help="Reference WAV for both engines (default: ./ref.wav)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=COMPARE_SEED,
@@ -195,6 +207,9 @@ def main() -> int:
         choices=list(VERSION_BUNDLES),
     )
     args = parser.parse_args()
+    ref_audio = args.ref_audio.expanduser().resolve()
+    if not ref_audio.is_file():
+        parser.error(f"reference WAV missing at {ref_audio}; pass --ref-audio PATH")
 
     repo = args.repo.resolve()
     upstream = repo / "gpt-sovits-upstream"
@@ -220,21 +235,21 @@ def main() -> int:
             upstream,
             version,
             use_params,
-            bundle / "ref.wav",
+            ref_audio,
             repo,
             args.text,
             args.ref_text,
             args.seed,
         )
         rs_out = repo / f"output_{version.lower()}.wav"
-        run_rust(repo, bundle, use_params, rs_out, args.text, args.ref_text, args.seed)
+        run_rust(repo, bundle, use_params, ref_audio, rs_out, args.text, args.ref_text, args.seed)
 
         py_stats = audio_stats(py_out)
         rs_stats = audio_stats(rs_out)
         sim = waveform_similarity(py_stats["audio"], rs_stats["audio"])
 
         try:
-            t2s = run_t2s_snapshot(repo, bundle, use_params, args.text, args.ref_text)
+            t2s = run_t2s_snapshot(repo, bundle, use_params, ref_audio, args.text, args.ref_text)
         except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
             t2s = {"error": str(exc)}
 

@@ -54,7 +54,7 @@ def waveform_similarity(a: np.ndarray, b: np.ndarray) -> dict:
     }
 
 
-def dump_python_sv(upstream: Path, ref_audio: Path) -> dict:
+def dump_python_sv(model_path: Path, ref_audio: Path) -> dict:
     os.chdir(upstream)
     sys.path.insert(0, str(upstream))
     sys.path.insert(0, str(upstream / "GPT_SoVITS"))
@@ -76,8 +76,7 @@ def dump_python_sv(upstream: Path, ref_audio: Path) -> dict:
         sample_frequency=16000,
         dither=0,
     ).numpy()
-    bundle = ref_audio.parent
-    sv_onnx = bundle / "sv.onnx"
+    sv_onnx = model_path / "sv.onnx"
     sess = ort.InferenceSession(str(sv_onnx), providers=["CPUExecutionProvider"])
     emb = sess.run(None, {"audio_feature": fbank.astype(np.float32)})[0]
     arr = emb.reshape(-1)
@@ -92,7 +91,7 @@ def dump_python_sv(upstream: Path, ref_audio: Path) -> dict:
     }
 
 
-def dump_rust_sv(repo: Path, model_path: Path, ref_text: str) -> dict:
+def dump_rust_sv(repo: Path, model_path: Path, ref_audio: Path, ref_text: str) -> dict:
     out = subprocess.check_output(
         [
             "cargo",
@@ -104,6 +103,8 @@ def dump_rust_sv(repo: Path, model_path: Path, ref_text: str) -> dict:
             "--",
             "--model-path",
             str(model_path),
+            "--ref-audio",
+            str(ref_audio),
             "--ref-text",
             ref_text,
         ],
@@ -144,11 +145,20 @@ def main() -> int:
         required=True,
         help="Reference prompt text",
     )
+    parser.add_argument(
+        "--ref-audio",
+        type=Path,
+        default=Path("ref.wav"),
+        help="Reference WAV for both engines (default: ./ref.wav)",
+    )
     args = parser.parse_args()
+    ref_audio = args.ref_audio.expanduser().resolve()
+    if not ref_audio.is_file():
+        parser.error(f"reference WAV missing at {ref_audio}; pass --ref-audio PATH")
 
     repo = args.repo.resolve()
     upstream = repo / "gpt-sovits-upstream"
-    model_path = args.model_path or (upstream / "onnx-patched/v2proplus")
+    model_path = (args.model_path or (upstream / "onnx-patched/v2proplus")).expanduser().resolve()
     params_path = args.params
     if params_path is None:
         bundle_params = model_path / "infer_params.json"
@@ -157,7 +167,6 @@ def main() -> int:
 
     ref_text = args.ref_text
     text = args.text
-    ref_audio = model_path / "ref.wav"
 
     py_out = repo / "python_v2proplus.wav"
     rs_out = repo / "output.wav"
@@ -195,6 +204,8 @@ def main() -> int:
         "--",
         "--model-path",
         str(model_path),
+        "--ref-audio",
+        str(ref_audio),
         "--text",
         text,
         "--ref-text",
@@ -236,9 +247,9 @@ def main() -> int:
             report["duration_match"] = True
 
     if ref_audio.exists():
-        report["python_sv_emb"] = dump_python_sv(upstream, ref_audio)
+        report["python_sv_emb"] = dump_python_sv(model_path, ref_audio)
         try:
-            rust_sv = dump_rust_sv(repo, model_path, ref_text)
+            rust_sv = dump_rust_sv(repo, model_path, ref_audio, ref_text)
             report["rust_sv_emb"] = rust_sv
             py = np.array(report["python_sv_emb"]["head"])
             rs = np.array(rust_sv["head"])

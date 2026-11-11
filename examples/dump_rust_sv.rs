@@ -6,6 +6,8 @@ use std::path::PathBuf;
 struct Args {
     #[arg(long)]
     model_path: PathBuf,
+    #[arg(long, default_value = "ref.wav")]
+    ref_audio: PathBuf,
     #[arg(long)]
     ref_text: String,
 }
@@ -23,11 +25,7 @@ fn main() -> Result<(), GSVError> {
         None,
         Some(args.model_path.join("sv.onnx")),
     )?;
-    model.process_reference_sync(
-        args.model_path.join("ref.wav"),
-        &args.ref_text,
-        LangId::Auto,
-    )?;
+    model.process_reference_sync(&args.ref_audio, &args.ref_text, LangId::Auto)?;
 
     let sv_emb = model
         .sv_embedding()

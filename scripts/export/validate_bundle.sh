@@ -1,80 +1,33 @@
 #!/usr/bin/env bash
-# Validate an exported ONNX bundle (v2 / v2Pro / v2ProPlus).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-BUNDLE_DIR=""
-EXPECT_V2PRO=false
-
-usage() {
-    cat <<'EOF'
-Usage: validate_bundle.sh --bundle-dir PATH [--expect-v2pro]
-
-Checks required ONNX artifacts and Pro-family metadata in an export bundle.
-
-Options:
-  --bundle-dir PATH   Required: onnx-patched export directory
-  --expect-v2pro      Require sv.onnx and a VITS speaker-embedding input
-  -h, --help          Show this help
-EOF
-}
-
+PYTHON=""
+ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-    --bundle-dir)
-        BUNDLE_DIR="$2"
+    --python)
+        [[ $# -ge 2 ]] || die "--python requires an executable"
+        PYTHON="$2"
         shift 2
         ;;
-    --expect-v2pro)
-        EXPECT_V2PRO=true
-        shift
-        ;;
-    -h | --help)
-        usage
+    -h|--help)
+        echo "Usage: validate_bundle.sh [--python PATH] --bundle-dir PATH [--expect-v2pro] [--expect-ordinary|--expect-streaming] [--expect-qnn]"
+        echo "Use an explicit Python with ONNX installed, or the export environment."
         exit 0
         ;;
     *)
-        die "Unknown argument: $1"
+        ARGS+=("$1")
+        shift
         ;;
     esac
 done
 
-[[ -n "${BUNDLE_DIR}" ]] || die "--bundle-dir is required"
-[[ -d "${BUNDLE_DIR}" ]] || die "Bundle directory not found: ${BUNDLE_DIR}"
-
-require_file() {
-    [[ -f "${BUNDLE_DIR}/$1" ]] || die "Missing required file: ${BUNDLE_DIR}/$1"
-}
-
-
-require_file "ssl.onnx"
-require_file "bert.onnx"
-require_file "g2pW.onnx"
-require_file "vits.onnx"
-require_file "t2s_encoder.onnx"
-require_file "t2s_fs_decoder.onnx"
-require_file "t2s_s_decoder.onnx"
-require_file "g2p_en/encoder_model.onnx"
-require_file "g2p_en/decoder_model.onnx"
-
-resolve_env_manager
-run_python "${ONNX_RS_ROOT}/scripts/vits_dynamic.py" "${BUNDLE_DIR}/vits.onnx"
-
-if [[ -f "${BUNDLE_DIR}/vits_ref.onnx" ]]; then
-    require_file "sv.onnx"
-elif $EXPECT_V2PRO; then
-    require_file "sv.onnx"
-    grep -aq "sv_emb" "${BUNDLE_DIR}/vits.onnx" || \
-        die "Expected sv_emb input in vits.onnx"
+if [[ -n "$PYTHON" ]]; then
+    "$PYTHON" "${ONNX_RS_ROOT}/scripts/validate_bundle.py" "${ARGS[@]}"
+else
+    run_python "${ONNX_RS_ROOT}/scripts/validate_bundle.py" "${ARGS[@]}"
 fi
-
-JSON_CANDIDATE="$(dirname "${BUNDLE_DIR}")/$(basename "${BUNDLE_DIR}").json"
-if [[ -f "${JSON_CANDIDATE}" ]]; then
-    log_info "Metadata: ${JSON_CANDIDATE}"
-    grep -E '"Version"|"IsV2Pro"' "${JSON_CANDIDATE}" || true
-fi
-
-log_ok "Bundle validation passed for ${BUNDLE_DIR}"

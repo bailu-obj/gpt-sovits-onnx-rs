@@ -153,9 +153,15 @@ fn apply_top_k(logits: &mut [f32], top_k: usize) {
     if k == 0 || k >= vocab {
         return;
     }
-    let mut pivot: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-    pivot.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let threshold = pivot[k - 1].1;
+    let mut candidates = logits.to_vec();
+    let descending = |a: &f32, b: &f32| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal);
+    let threshold = if candidates.iter().any(|value| value.is_nan()) {
+        let mut ranked: Vec<_> = logits.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| descending(&a.1, &b.1));
+        ranked[k - 1].1
+    } else {
+        *candidates.select_nth_unstable_by(k - 1, descending).1
+    };
     for logit in logits.iter_mut() {
         if *logit < threshold {
             *logit = f32::NEG_INFINITY;
@@ -211,7 +217,7 @@ fn gumbel_max_sample(probs: &[f32], rng: &mut StdRng) -> i64 {
     let mut best_score = f32::NEG_INFINITY;
     for (idx, &prob) in probs.iter().enumerate() {
         let u: f32 = rng.random::<f32>().max(1e-10);
-        let score = prob / (-u.ln());
+        let score = if prob == 0.0 { 0.0 } else { prob / (-u.ln()) };
         if score > best_score {
             best_score = score;
             best_idx = idx;
@@ -329,6 +335,35 @@ mod tests {
         let mut sampler2 = Sampler::with_seed(42);
         let b = sampler2.sample(&mut l2, &[], &params);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn top_k_preserves_threshold_ties() {
+        let mut logits = [2.0, 3.0, -1.0, 2.0, f32::NEG_INFINITY];
+        apply_top_k(&mut logits, 2);
+        assert_eq!(
+            logits,
+            [2.0, 3.0, f32::NEG_INFINITY, 2.0, f32::NEG_INFINITY]
+        );
+    }
+
+    #[test]
+    fn masked_probabilities_preserve_seeded_draws() {
+        let mut reference = StdRng::seed_from_u64(42);
+        let mut candidate = reference.clone();
+        let probs = [0.0, 0.1, 0.0, 0.3, 0.6, 0.0];
+        for _ in 0..64 {
+            let mut best = (0, f32::NEG_INFINITY);
+            for (idx, prob) in probs.iter().enumerate() {
+                let u = reference.random::<f32>().max(1e-10);
+                let score = prob / (-u.ln());
+                if score > best.1 {
+                    best = (idx, score);
+                }
+            }
+            assert_eq!(gumbel_max_sample(&probs, &mut candidate), best.0 as i64);
+        }
+        assert_eq!(reference.random::<u64>(), candidate.random::<u64>());
     }
 }
 
