@@ -90,11 +90,12 @@ rsync -a --exclude='/vits.onnx' "$CACHED_DIR/" "$STREAM_DIR/"
 
 ### 3. macOS 构建与使用
 
-`cargo run` 会构建并运行示例。参考音与模型包分开保存，运行时用 `--ref-audio` 指定 WAV，
-用 `--ref-text` 传入准确转录。省略 `--ref-audio` 时，CLI 读取当前工作目录的 `ref.wav`。
+准备稳定版 Rust、CMake 和 Xcode Command Line Tools。`cargo run` 会构建并运行示例。
+参考音与模型包分开保存，运行时用 `--ref-audio` 指定 WAV，用 `--ref-text` 传入准确转录。
+省略 `--ref-audio` 时，CLI 读取当前工作目录的 `ref.wav`。
 
 ```bash
-cargo run --release --example gpt_sovits_demo -- \
+cargo run --locked --release --example gpt_sovits_demo -- \
   --model-path "$STREAM_DIR" --stream \
   --ref-audio /path/to/ref.wav \
   --ref-text '<参考音频的准确转录>' --text '等雨停下来以后，我们可以沿着河边慢慢走到灯塔，再去那家小店坐一会儿。' \
